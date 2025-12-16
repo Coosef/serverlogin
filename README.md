@@ -41,10 +41,10 @@ Kapsamlı kullanıcı aktivite izleme sistemi - Hem Linux hem Windows Server iç
 
 ```bash
 # Tek komutla kurulum
-curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/serverlogin/main/ssh_login/install_linux.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Coosef/serverlogin/main/ssh_login/install_linux.sh | sudo bash
 
 # Veya dosyayı indirip çalıştır
-wget https://raw.githubusercontent.com/YOUR_USERNAME/serverlogin/main/ssh_login/install_linux.sh
+wget https://raw.githubusercontent.com/Coosef/serverlogin/main/ssh_login/install_linux.sh
 sudo bash install_linux.sh
 ```
 
@@ -52,7 +52,7 @@ sudo bash install_linux.sh
 
 ```powershell
 # PowerShell'i Yönetici olarak açın
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_USERNAME/serverlogin/main/ssh_login/install_windows.ps1" -OutFile install.ps1
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Coosef/serverlogin/main/ssh_login/install_windows.ps1" -OutFile install.ps1
 .\install.ps1
 ```
 

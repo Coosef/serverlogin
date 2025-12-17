@@ -40,6 +40,7 @@ function getEventInfo(eventType) {
     "ssh_failed_login": { emoji: "❌", text: "Başarısız SSH Girişi", critical: true },
     "ssh_success_login": { emoji: "✅", text: "Başarılı SSH Girişi", critical: false },
     "ssh_logout": { emoji: "👋", text: "SSH Çıkışı", critical: false },
+    "ssh_connection_closed": { emoji: "🔌", text: "SSH Bağlantı Kesildi (Preauth)", critical: false },
     
     // Linux Events
     "sudo_command": { emoji: "🔐", text: "Sudo Komutu", critical: true },
@@ -91,6 +92,8 @@ lines.push("");
 // Kullanıcı Bilgileri
 if (body.user) {
   lines.push(esc("👤 Kullanıcı: " + body.user));
+} else if (body.is_preauth) {
+  lines.push(esc("👤 Kullanıcı: Bilinmiyor (Preauth - Oturum açılmadan bağlantı kesildi)"));
 }
 
 // Bağlantı Türü (SFTP/SSH)
@@ -105,6 +108,17 @@ if (body.ip) {
 }
 if (body.port) {
   lines.push(esc("🔌 Port: " + body.port));
+}
+
+// Preauth durumu
+if (body.is_preauth) {
+  lines.push("");
+  lines.push(esc("⚠️ Preauth: Oturum açılmadan bağlantı kesildi"));
+}
+
+// Disconnect reason
+if (body.disconnect_reason) {
+  lines.push(esc("📝 Kesilme Nedeni: " + body.disconnect_reason));
 }
 
 // SFTP Subsystem

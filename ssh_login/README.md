@@ -336,5 +336,5 @@ Sorun yaşarsanız:
 hostname
 
 # Eğer boşsa, ayarla
-sudo hostnamectl set-hostname "my-server-name"
+sudo hostnamectl set-hostname "hostingdunyamotomas"
 sudo systemctl restart user_activity_monitor.service

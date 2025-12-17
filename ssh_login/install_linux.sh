@@ -83,7 +83,8 @@ logging.basicConfig(
 RE_SSH_INVALID_USER = re.compile(r"Invalid user (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)")
 RE_SSH_FAILED_LOGIN = re.compile(r"Failed password for (invalid user )?(\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)")
 RE_SSH_SUCCESS_LOGIN = re.compile(r"Accepted .* for (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)")
-RE_SSH_LOGOUT = re.compile(r"Received disconnect from (\d+\.\d+\.\d+\.\d+)")
+RE_SSH_LOGOUT = re.compile(r"Received disconnect from (\d+\.\d+\.\d+\.\d+) port (\d+)(?::\d+)?:(\d+):\s*(.+?)(?:\s*\[preauth\])?")
+RE_SSH_LOGOUT_SIMPLE = re.compile(r"Received disconnect from (\d+\.\d+\.\d+\.\d+) port (\d+)")
 RE_SUDO = re.compile(r"(\S+) : TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(.+)")
 RE_SUDO_FAILED = re.compile(r"(\S+) : (\d+) incorrect password attempts")
 # SFTP ve bağlantı türü pattern'leri
@@ -361,11 +362,37 @@ def parse_auth_event(line: str):
             "raw": line
         }
     
+    # SSH Logout - Received disconnect
     m = RE_SSH_LOGOUT.search(line)
     if m:
+        ip = m.group(1)
+        port = m.group(2)
+        reason_code = m.group(3) if len(m.groups()) > 2 else None
+        reason = m.group(4) if len(m.groups()) > 3 else None
+        is_preauth = "[preauth]" in line.lower()
+        
         return {
-            "event_type": "ssh_logout",
-            "ip": m.group(1),
+            "event_type": "ssh_connection_closed" if is_preauth else "ssh_logout",
+            "ip": ip,
+            "port": port,
+            "reason_code": reason_code,
+            "reason": reason,
+            "is_preauth": is_preauth,
+            "raw": line
+        }
+    
+    # Basit logout pattern (fallback)
+    m = RE_SSH_LOGOUT_SIMPLE.search(line)
+    if m:
+        ip = m.group(1)
+        port = m.group(2)
+        is_preauth = "[preauth]" in line.lower()
+        
+        return {
+            "event_type": "ssh_connection_closed" if is_preauth else "ssh_logout",
+            "ip": ip,
+            "port": port,
+            "is_preauth": is_preauth,
             "raw": line
         }
     
@@ -659,11 +686,46 @@ def main():
                     })
                     send_to_webhook(webhook_url, base_payload)
             
-            elif event_type == "ssh_logout":
+            elif event_type in ("ssh_logout", "ssh_connection_closed"):
                 if monitor_logins:
-                    base_payload.update({
-                        "ip": event.get("ip")
-                    })
+                    ip = event.get("ip")
+                    port = event.get("port")
+                    is_preauth = event.get("is_preauth", False)
+                    
+                    # Preauth durumunda kullanıcı bilgisi yok (oturum açılmadan bağlantı kesildi)
+                    # Gerçek logout'ta kullanıcı bilgisini buffer'dan veya mapping'den bul
+                    user = None
+                    if not is_preauth:
+                        # Buffer'da session closed for user X pattern'i ara
+                        for buffered_line in reversed(list(log_buffer)):
+                            session_closed_match = re.search(r"session closed for user (\S+)", buffered_line, re.IGNORECASE)
+                            if session_closed_match:
+                                user = session_closed_match.group(1)
+                                break
+                        
+                        # Mapping'den kontrol et
+                        if not user:
+                            for mapped_user, mapping in user_ip_map.items():
+                                if mapping["ip"] == ip:
+                                    user = mapped_user
+                                    break
+                    
+                    payload_data = {
+                        "ip": ip,
+                        "port": port,
+                        "is_preauth": is_preauth,
+                        "connection_type": "SSH"
+                    }
+                    
+                    if user:
+                        payload_data["user"] = user
+                    
+                    if event.get("reason"):
+                        payload_data["disconnect_reason"] = event.get("reason")
+                    elif event.get("reason_code"):
+                        payload_data["disconnect_reason_code"] = event.get("reason_code")
+                    
+                    base_payload.update(payload_data)
                     send_to_webhook(webhook_url, base_payload)
             
             elif event_type == "sudo_command":

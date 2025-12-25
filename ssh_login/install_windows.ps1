@@ -362,8 +362,7 @@ $pythonDir = Split-Path $pythonPath -Parent
 $pythonPathEnv = "$pythonDir;" + $env:PATH
 & $NSSMPath set $ServiceName AppEnvironmentExtra "PATH=$pythonPathEnv"
 
-# Use unbuffered Python output for better logging
-& $NSSMPath set $ServiceName AppParameters "-u `"$ScriptPath`""
+# Parameters are set via wrapper batch file, no need to set here
 
 Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow
@@ -378,15 +377,17 @@ try {
     
     # Verify and fix all service settings
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    if ($currentApp -ne $pythonPath) {
-        Write-Host "       Updating Python path..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$pythonPath"
+    $expectedApp = "cmd.exe"
+    if ($currentApp -ne $expectedApp) {
+        Write-Host "       Updating application to cmd.exe..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$expectedApp"
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    if ($currentParams -ne $ScriptPath) {
-        Write-Host "       Updating script path..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName AppParameters "$ScriptPath"
+    $expectedParams = "/c `"$wrapperBatch`""
+    if ($currentParams -ne $expectedParams) {
+        Write-Host "       Updating parameters to use wrapper batch..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName AppParameters "$expectedParams"
     }
     
     # Ensure working directory is set

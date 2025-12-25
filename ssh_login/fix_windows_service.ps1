@@ -176,8 +176,8 @@ try {
         Write-Host "  Service status:  Get-Service $ServiceName" -ForegroundColor White
         $stderrLog = Join-Path $LogDir "service_stderr.log"
         $activityLog = Join-Path $LogDir "activity_monitor.log"
-        Write-Host "  View logs:       Get-Content $stderrLog -Tail 20" -ForegroundColor White
-        Write-Host "  View activity:   Get-Content $activityLog -Tail 20" -ForegroundColor White
+        Write-Host ("  View logs:       Get-Content " + $stderrLog + " -Tail 20") -ForegroundColor White
+        Write-Host ("  View activity:   Get-Content " + $activityLog + " -Tail 20") -ForegroundColor White
     } else {
         Write-Host ""
         Write-Host "[WARNING] Service did not start" -ForegroundColor Yellow
@@ -185,7 +185,7 @@ try {
         Write-Host ""
         Write-Host "         Check error logs:" -ForegroundColor Cyan
         $stderrLog = Join-Path $LogDir "service_stderr.log"
-        Write-Host "         Get-Content $stderrLog" -ForegroundColor White
+        Write-Host ("         Get-Content " + $stderrLog) -ForegroundColor White
     }
 } catch {
     Write-Host ""
@@ -194,8 +194,8 @@ try {
     Write-Host "Check error logs:" -ForegroundColor Cyan
     $stderrLog = Join-Path $LogDir "service_stderr.log"
     $stdoutLog = Join-Path $LogDir "service_stdout.log"
-    Write-Host "  Get-Content $stderrLog" -ForegroundColor White
-    Write-Host "  Get-Content $stdoutLog" -ForegroundColor White
+    Write-Host ("  Get-Content " + $stderrLog) -ForegroundColor White
+    Write-Host ("  Get-Content " + $stdoutLog) -ForegroundColor White
 }
 
 Write-Host ""

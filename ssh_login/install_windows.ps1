@@ -310,18 +310,41 @@ try {
     # Try to fix common issues
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
-    # Verify Python path is correct
-    $currentApp = & $NSSMPath get $ServiceName Application
+    # Verify and fix all service settings
+    $currentApp = & $NSSMPath get $ServiceName Application 2>&1
     if ($currentApp -ne $pythonPath) {
         Write-Host "       Updating Python path..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName Application "$pythonPath"
     }
     
-    # Verify script path is correct
-    $currentParams = & $NSSMPath get $ServiceName AppParameters
+    $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
     if ($currentParams -ne $ScriptPath) {
         Write-Host "       Updating script path..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName AppParameters "$ScriptPath"
+    }
+    
+    # Ensure working directory is set
+    $currentDir = & $NSSMPath get $ServiceName AppDirectory 2>&1
+    if ($currentDir -ne $InstallDir) {
+        Write-Host "       Updating working directory..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName AppDirectory "$InstallDir"
+    }
+    
+    # Check Windows Event Viewer for service errors
+    Write-Host "       Checking Windows Event Viewer for errors..." -ForegroundColor Gray
+    try {
+        $events = Get-WinEvent -LogName System -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object {
+            $_.TimeCreated -gt (Get-Date).AddMinutes(-5) -and
+            ($_.Message -like "*UserActivityMonitor*" -or $_.Message -like "*python*")
+        }
+        if ($events) {
+            Write-Host "       Recent service-related events found:" -ForegroundColor Yellow
+            $events | ForEach-Object {
+                Write-Host "         [$($_.TimeCreated)] $($_.Message.Substring(0, [Math]::Min(100, $_.Message.Length)))" -ForegroundColor Red
+            }
+        }
+    } catch {
+        # Ignore event viewer errors
     }
     
     # Try starting again
@@ -332,13 +355,27 @@ try {
         Start-Sleep -Seconds 3
     } catch {
         Write-Host "       Service still failed to start" -ForegroundColor Yellow
+        
+        # Check NSSM service status
+        Write-Host "       Checking NSSM service status..." -ForegroundColor Gray
+        $nssmStatus = & $NSSMPath status $ServiceName 2>&1
+        Write-Host "       NSSM status: $nssmStatus" -ForegroundColor Gray
+        
+        # Try to get service exit code
+        $exitCode = & $NSSMPath get $ServiceName AppExitCodeDefault 2>&1
+        Write-Host "       Service exit code: $exitCode" -ForegroundColor Gray
+        
         Write-Host "       Checking error logs..." -ForegroundColor Gray
         if (Test-Path "$LogDir\service_stderr.log") {
             $errorLog = Get-Content "$LogDir\service_stderr.log" -Tail 10 -ErrorAction SilentlyContinue
             if ($errorLog) {
                 Write-Host "       Error log content:" -ForegroundColor Yellow
                 $errorLog | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+            } else {
+                Write-Host "       Error log is empty - service may not be starting at all" -ForegroundColor Yellow
             }
+        } else {
+            Write-Host "       Error log file does not exist yet" -ForegroundColor Yellow
         }
     }
 }

@@ -305,13 +305,6 @@ if (Test-Path $python313Path) {
 
 Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
 
-# Create a wrapper batch file for more reliable service execution
-$wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
-# Batch file with proper quoting for paths with spaces
-$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
-[System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
-Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
-
 # Test Python script before installing service (only if WEBHOOK_URL is configured)
 if ($webhookConfigured) {
     Write-Host "       Testing Python script..." -ForegroundColor Gray
@@ -336,10 +329,9 @@ if ($webhookConfigured) {
     Write-Host "       Service will be installed but may not start until WEBHOOK_URL is set" -ForegroundColor Yellow
 }
 
-# Install service using wrapper batch file for better reliability
-# Use full path to cmd.exe and properly quote the batch file
-$cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
-& $NSSMPath install $ServiceName $cmdExe "/c `"$wrapperBatch`""
+# Install service using Python directly with proper working directory
+# NSSM will handle the working directory via AppDirectory setting
+& $NSSMPath install $ServiceName $pythonPath "`"$ScriptPath`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -379,17 +371,16 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
-    $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    if ($currentApp -ne $cmdExe) {
-        Write-Host "       Updating application to cmd.exe..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$cmdExe"
+    if ($currentApp -ne $pythonPath) {
+        Write-Host "       Updating Python path..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$pythonPath"
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    $expectedParams = "/c `"$wrapperBatch`""
+    $expectedParams = "`"$ScriptPath`""
     if ($currentParams -ne $expectedParams) {
-        Write-Host "       Updating parameters to use wrapper batch..." -ForegroundColor Gray
+        Write-Host "       Updating script path..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName AppParameters "$expectedParams"
     }
     

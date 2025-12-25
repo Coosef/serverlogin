@@ -12,10 +12,15 @@ $NSSMPath = "$InstallDir\nssm.exe"
 $ScriptPath = "$InstallDir\user_activity_monitor.py"
 $LogDir = "$InstallDir\logs"
 
+# String constants to avoid PowerShell parsing issues
+$ErrorPrefix = "[ERROR]"
+$WarningPrefix = "[WARNING]"
+
 # Check if running as administrator
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "[ERROR] This script must be run as ADMINISTRATOR!" -ForegroundColor Red
+    $adminError = $ErrorPrefix + " This script must be run as ADMINISTRATOR!"
+    Write-Host $adminError -ForegroundColor Red
     Write-Host "Please open PowerShell with 'Run as Administrator'." -ForegroundColor Yellow
     exit 1
 }
@@ -74,13 +79,15 @@ if (Test-Path $python313Path) {
 Write-Host ""
 Write-Host "[4/6] Verifying files..." -ForegroundColor Yellow
 if (-not (Test-Path $ScriptPath)) {
-    Write-Host "       [ERROR] Python script not found: $ScriptPath" -ForegroundColor Red
+    $scriptError = $ErrorPrefix + " Python script not found: " + $ScriptPath
+    Write-Host "       $scriptError" -ForegroundColor Red
     exit 1
 }
 Write-Host "       Python script found" -ForegroundColor Green
 
 if (-not (Test-Path $NSSMPath)) {
-    Write-Host "       [ERROR] NSSM not found: $NSSMPath" -ForegroundColor Red
+    $nssmError = $ErrorPrefix + " NSSM not found: " + $NSSMPath
+    Write-Host "       $nssmError" -ForegroundColor Red
     exit 1
 }
 Write-Host "       NSSM found" -ForegroundColor Green
@@ -104,7 +111,8 @@ Write-Host "[6/6] Updating service settings..." -ForegroundColor Yellow
 if ($LASTEXITCODE -eq 0) {
     Write-Host "       Python path updated" -ForegroundColor Green
 } else {
-    Write-Host "       [WARNING] Failed to update Python path" -ForegroundColor Yellow
+    $warningMsg = $WarningPrefix + " Failed to update Python path"
+    Write-Host "       $warningMsg" -ForegroundColor Yellow
 }
 
 # Update script parameters
@@ -112,7 +120,8 @@ if ($LASTEXITCODE -eq 0) {
 if ($LASTEXITCODE -eq 0) {
     Write-Host "       Script parameters updated" -ForegroundColor Green
 } else {
-    Write-Host "       [WARNING] Failed to update script parameters" -ForegroundColor Yellow
+    $warningMsg = $WarningPrefix + " Failed to update script parameters"
+    Write-Host "       $warningMsg" -ForegroundColor Yellow
 }
 
 # Update working directory
@@ -120,7 +129,8 @@ if ($LASTEXITCODE -eq 0) {
 if ($LASTEXITCODE -eq 0) {
     Write-Host "       Working directory updated" -ForegroundColor Green
 } else {
-    Write-Host "       [WARNING] Failed to update working directory" -ForegroundColor Yellow
+    $warningMsg = $WarningPrefix + " Failed to update working directory"
+    Write-Host "       $warningMsg" -ForegroundColor Yellow
 }
 
 # Update log files
@@ -129,7 +139,8 @@ if ($LASTEXITCODE -eq 0) {
 if ($LASTEXITCODE -eq 0) {
     Write-Host "       Log files updated" -ForegroundColor Green
 } else {
-    Write-Host "       [WARNING] Failed to update log files" -ForegroundColor Yellow
+    $warningMsg = $WarningPrefix + " Failed to update log files"
+    Write-Host "       $warningMsg" -ForegroundColor Yellow
 }
 
 # Step 7: Test Python script manually
@@ -142,14 +153,16 @@ if (-not $testProcess.HasExited) {
     Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
     Write-Host "       Script started successfully (stopped after test)" -ForegroundColor Green
 } else {
-    Write-Host "       [WARNING] Script exited immediately" -ForegroundColor Yellow
+    $warningMsg = $WarningPrefix + " Script exited immediately"
+    Write-Host "       $warningMsg" -ForegroundColor Yellow
     if (Test-Path "$LogDir\test_stderr.log") {
         $errorContent = Get-Content "$LogDir\test_stderr.log" -Tail 5
         if ($errorContent) {
             Write-Host "       Error output:" -ForegroundColor Red
             $errorContent | ForEach-Object { 
                 $line = $_
-                Write-Host ("         " + $line) -ForegroundColor Red 
+                $outputLine = "         " + $line
+                Write-Host $outputLine -ForegroundColor Red 
             }
         }
     }
@@ -185,7 +198,8 @@ try {
         Write-Host $viewActivityCmd -ForegroundColor White
     } else {
         Write-Host ""
-        Write-Host "[WARNING] Service did not start" -ForegroundColor Yellow
+        $warningMsg = $WarningPrefix + " Service did not start"
+        Write-Host "         $warningMsg" -ForegroundColor Yellow
         Write-Host "         Status: $($service.Status)" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "         Check error logs:" -ForegroundColor Cyan
@@ -197,9 +211,8 @@ try {
     Write-Host ""
     $exception = $_.Exception
     $errorText = $exception.Message
-    $errorPrefix = "[ERROR] Failed to start service: "
-    $fullError = $errorPrefix + $errorText
-    Write-Host $fullError -ForegroundColor Red
+    $errorMsg = $ErrorPrefix + " Failed to start service: " + $errorText
+    Write-Host $errorMsg -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
     $stderrLogPath = Join-Path $LogDir "service_stderr.log"
@@ -213,4 +226,3 @@ try {
 }
 
 Write-Host ""
-

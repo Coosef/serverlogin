@@ -332,10 +332,29 @@ if ($webhookConfigured) {
 # Install service using PowerShell wrapper script (most reliable for Windows Store Python)
 # Create PowerShell wrapper script for reliable service execution
 $wrapperScript = Join-Path $InstallDir "start_monitor.ps1"
+
+# Add Python directory to PATH for service context
+$pythonDir = Split-Path $pythonPath -Parent
+$pythonDirInPath = $env:PATH -split ';' | Where-Object { $_ -eq $pythonDir }
+if (-not $pythonDirInPath) {
+    Write-Host "       Adding Python directory to PATH..." -ForegroundColor Gray
+    $env:PATH = "$pythonDir;$env:PATH"
+}
+
+# Use python.exe from PATH (more reliable in service context)
+# If python.exe is not in PATH, use full path with proper escaping
 $psContent = @"
 # PowerShell wrapper for User Activity Monitor
 Set-Location -Path `"$InstallDir`"
-& `"$pythonPath`" -u `"$ScriptPath`"
+`$pythonDir = `"$pythonDir`"
+`$env:PATH = `"`$pythonDir;`$env:PATH`"
+`$pythonExe = Join-Path `$pythonDir `"python.exe`"
+if (Test-Path `$pythonExe) {
+    & `$pythonExe -u `"$ScriptPath`"
+} else {
+    # Fallback to full path
+    & `"$pythonPath`" -u `"$ScriptPath`"
+}
 "@
 [System.IO.File]::WriteAllText($wrapperScript, $psContent, [System.Text.Encoding]::UTF8)
 Write-Host "       Created PowerShell wrapper script: $wrapperScript" -ForegroundColor Gray
@@ -399,10 +418,19 @@ try {
     }
     
     # Ensure PowerShell wrapper script exists and is up to date
+    $pythonDir = Split-Path $pythonPath -Parent
     $psContent = @"
 # PowerShell wrapper for User Activity Monitor
 Set-Location -Path `"$InstallDir`"
-& `"$pythonPath`" -u `"$ScriptPath`"
+`$pythonDir = `"$pythonDir`"
+`$env:PATH = `"`$pythonDir;`$env:PATH`"
+`$pythonExe = Join-Path `$pythonDir `"python.exe`"
+if (Test-Path `$pythonExe) {
+    & `$pythonExe -u `"$ScriptPath`"
+} else {
+    # Fallback to full path
+    & `"$pythonPath`" -u `"$ScriptPath`"
+}
 "@
     if (-not (Test-Path $wrapperScript)) {
         Write-Host "       Creating PowerShell wrapper script..." -ForegroundColor Gray

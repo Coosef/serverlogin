@@ -351,6 +351,11 @@ Write-Host "       Configuring service settings..." -ForegroundColor Gray
 & $NSSMPath set $ServiceName AppStopMethodThreads 1500
 & $NSSMPath set $ServiceName AppExitCodeDefault 0
 
+# Set environment variables for Python
+$pythonDir = Split-Path $pythonPath -Parent
+$pythonPathEnv = "$pythonDir;" + $env:PATH
+& $NSSMPath set $ServiceName AppEnvironmentExtra "PATH=$pythonPathEnv"
+
 Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow
 try {

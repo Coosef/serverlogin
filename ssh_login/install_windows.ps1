@@ -303,13 +303,43 @@ Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow
 try {
     Start-Service -Name $ServiceName -ErrorAction Stop
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
 } catch {
-    Write-Host "       ⚠️  Service start failed: $_" -ForegroundColor Yellow
-    Write-Host "       Checking error logs..." -ForegroundColor Gray
-    if (Test-Path "$LogDir\service_stderr.log") {
-        Write-Host "       Error log content:" -ForegroundColor Yellow
-        Get-Content "$LogDir\service_stderr.log" -Tail 10 | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+    Write-Host "       Service start failed, attempting to fix..." -ForegroundColor Yellow
+    
+    # Try to fix common issues
+    Write-Host "       Verifying service configuration..." -ForegroundColor Gray
+    
+    # Verify Python path is correct
+    $currentApp = & $NSSMPath get $ServiceName Application
+    if ($currentApp -ne $pythonPath) {
+        Write-Host "       Updating Python path..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$pythonPath"
+    }
+    
+    # Verify script path is correct
+    $currentParams = & $NSSMPath get $ServiceName AppParameters
+    if ($currentParams -ne $ScriptPath) {
+        Write-Host "       Updating script path..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName AppParameters "$ScriptPath"
+    }
+    
+    # Try starting again
+    Write-Host "       Retrying service start..." -ForegroundColor Gray
+    Start-Sleep -Seconds 2
+    try {
+        Start-Service -Name $ServiceName -ErrorAction Stop
+        Start-Sleep -Seconds 3
+    } catch {
+        Write-Host "       Service still failed to start" -ForegroundColor Yellow
+        Write-Host "       Checking error logs..." -ForegroundColor Gray
+        if (Test-Path "$LogDir\service_stderr.log") {
+            $errorLog = Get-Content "$LogDir\service_stderr.log" -Tail 10 -ErrorAction SilentlyContinue
+            if ($errorLog) {
+                Write-Host "       Error log content:" -ForegroundColor Yellow
+                $errorLog | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+            }
+        }
     }
 }
 

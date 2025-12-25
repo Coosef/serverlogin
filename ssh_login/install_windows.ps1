@@ -375,9 +375,14 @@ try {
         $nssmStatus = & $NSSMPath status $ServiceName 2>&1
         Write-Host "       NSSM status: $nssmStatus" -ForegroundColor Gray
         
-        # Try to get service exit code
-        $exitCode = & $NSSMPath get $ServiceName AppExitCodeDefault 2>&1
-        Write-Host "       Service exit code: $exitCode" -ForegroundColor Gray
+        # Get all NSSM service settings for debugging
+        Write-Host "       Current service settings:" -ForegroundColor Gray
+        $currentApp = & $NSSMPath get $ServiceName Application 2>&1
+        $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
+        $currentDir = & $NSSMPath get $ServiceName AppDirectory 2>&1
+        Write-Host "         Application: $currentApp" -ForegroundColor White
+        Write-Host "         Parameters: $currentParams" -ForegroundColor White
+        Write-Host "         Directory: $currentDir" -ForegroundColor White
         
         Write-Host "       Checking error logs..." -ForegroundColor Gray
         if (Test-Path "$LogDir\service_stderr.log") {

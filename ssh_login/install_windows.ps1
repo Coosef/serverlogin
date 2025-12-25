@@ -378,30 +378,84 @@ if ($service -and $service.Status -eq "Running") {
 } else {
     Write-Host ""
     Write-Host "[WARNING] Service installed but could not be started!" -ForegroundColor Yellow
-    Write-Host "         Please check manually:" -ForegroundColor Yellow
-    Write-Host "         Get-Service $ServiceName" -ForegroundColor White
-    Write-Host "         Get-Content $LogDir\service_stderr.log" -ForegroundColor White
     Write-Host ""
-    Write-Host "         Testing Python script manually..." -ForegroundColor Cyan
-    Write-Host "         Running: python $ScriptPath" -ForegroundColor Gray
+    Write-Host "         Diagnosing issue..." -ForegroundColor Cyan
+    
+    # Check error logs
+    $stderrLog = Join-Path $LogDir "service_stderr.log"
+    $stdoutLog = Join-Path $LogDir "service_stdout.log"
+    
+    if (Test-Path $stderrLog) {
+        Write-Host "         Error log content:" -ForegroundColor Yellow
+        $errorContent = Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue
+        if ($errorContent) {
+            $errorContent | ForEach-Object { Write-Host "           $_" -ForegroundColor Red }
+        } else {
+            Write-Host "           (log file is empty)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "         Error log file not found" -ForegroundColor Gray
+    }
+    
+    if (Test-Path $stdoutLog) {
+        Write-Host "         Output log content:" -ForegroundColor Yellow
+        $outputContent = Get-Content $stdoutLog -Tail 10 -ErrorAction SilentlyContinue
+        if ($outputContent) {
+            $outputContent | ForEach-Object { Write-Host "           $_" -ForegroundColor White }
+        }
+    }
+    
+    # Check .env file for WEBHOOK_URL
+    Write-Host ""
+    Write-Host "         Checking .env file..." -ForegroundColor Cyan
+    if (Test-Path $EnvPath) {
+        $envContent = Get-Content $EnvPath -ErrorAction SilentlyContinue
+        $webhookLine = $envContent | Select-String "WEBHOOK_URL"
+        if ($webhookLine) {
+            if ($webhookLine -match 'WEBHOOK_URL="(.*)"') {
+                $webhookUrl = $matches[1]
+                if ($webhookUrl -and $webhookUrl -ne "https://n8vp.yeb.one/webhook/useractivity") {
+                    Write-Host "         WEBHOOK_URL is set" -ForegroundColor Green
+                } else {
+                    Write-Host "         WEBHOOK_URL needs to be configured!" -ForegroundColor Red
+                }
+            }
+        } else {
+            Write-Host "         WEBHOOK_URL not found in .env file!" -ForegroundColor Red
+        }
+    }
+    
+    # Try to start service with more verbose output
+    Write-Host ""
+    Write-Host "         Attempting manual service start..." -ForegroundColor Cyan
     try {
-        $testOutput = python $ScriptPath 2>&1 | Select-Object -First 10
-        if ($testOutput) {
-            Write-Host "         Script output:" -ForegroundColor Yellow
-            $testOutput | ForEach-Object { Write-Host "           $_" -ForegroundColor Red }
+        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($service) {
+            Write-Host "         Current service status: $($service.Status)" -ForegroundColor White
+            if ($service.Status -eq "Stopped") {
+                Start-Service -Name $ServiceName -ErrorAction Stop
+                Start-Sleep -Seconds 3
+                $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+                if ($service.Status -eq "Running") {
+                    Write-Host "         Service started successfully!" -ForegroundColor Green
+                    Write-Host ""
+                    Write-Host "========================================" -ForegroundColor Green
+                    Write-Host "✓ Service is now running!" -ForegroundColor Green
+                    Write-Host "========================================" -ForegroundColor Green
+                    exit 0
+                }
+            }
         }
     } catch {
-        Write-Host "         Could not test script: $_" -ForegroundColor Red
+        $errorMsg = $_.Exception.Message
+        Write-Host "         Manual start failed: $errorMsg" -ForegroundColor Red
     }
+    
     Write-Host ""
-    Write-Host "         Common issues:" -ForegroundColor Cyan
-    Write-Host "         1. WEBHOOK_URL not set in .env file" -ForegroundColor White
-    Write-Host "         2. Python script has errors" -ForegroundColor White
-    Write-Host "         3. Missing Python packages" -ForegroundColor White
-    Write-Host ""
-    Write-Host "         To fix:" -ForegroundColor Cyan
-    Write-Host "         1. Edit: notepad $EnvPath" -ForegroundColor White
-    Write-Host "         2. Set WEBHOOK_URL to your n8n webhook URL" -ForegroundColor White
-    Write-Host "         3. Test: python $ScriptPath" -ForegroundColor White
-    Write-Host "         4. Start: Start-Service $ServiceName" -ForegroundColor White
+    Write-Host "         Manual troubleshooting:" -ForegroundColor Cyan
+    Write-Host "         1. Check service: Get-Service $ServiceName" -ForegroundColor White
+    Write-Host "         2. Check logs: Get-Content $stderrLog" -ForegroundColor White
+    Write-Host "         3. Edit .env: notepad $EnvPath" -ForegroundColor White
+    Write-Host "         4. Test script: $pythonPath $ScriptPath" -ForegroundColor White
+    Write-Host "         5. Start service: Start-Service $ServiceName" -ForegroundColor White
 }

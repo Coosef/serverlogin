@@ -215,13 +215,15 @@ try {
     Write-Host $errorMsg -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
-    $stderrLogPath = Join-Path $LogDir "service_stderr.log"
-    $stdoutLogPath = Join-Path $LogDir "service_stdout.log"
-    $getContentCmd = "Get-Content"
-    $stderrCommand = "  " + $getContentCmd + " " + $stderrLogPath
-    $stdoutCommand = "  " + $getContentCmd + " " + $stdoutLogPath
-    Write-Host $stderrCommand -ForegroundColor White
-    Write-Host $stdoutCommand -ForegroundColor White
+    $stderrLogFile = "service_stderr.log"
+    $stdoutLogFile = "service_stdout.log"
+    $stderrLogPath = Join-Path $LogDir $stderrLogFile
+    $stdoutLogPath = Join-Path $LogDir $stdoutLogFile
+    $cmdPrefix = "  Get-Content "
+    $stderrFull = $cmdPrefix + $stderrLogPath
+    $stdoutFull = $cmdPrefix + $stdoutLogPath
+    Write-Host $stderrFull -ForegroundColor White
+    Write-Host $stdoutFull -ForegroundColor White
 }
 
 Write-Host ""

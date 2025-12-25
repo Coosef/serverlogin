@@ -307,7 +307,8 @@ Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
 
 # Create a wrapper batch file for more reliable service execution
 $wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
-$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
+# Use simple batch file without quotes in paths (NSSM handles them)
+$batchContent = "@echo off`r`ncd /d $InstallDir`r`n$pythonPath -u $ScriptPath`r`n"
 [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
 Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
 
@@ -336,7 +337,9 @@ if ($webhookConfigured) {
 }
 
 # Install service using wrapper batch file for better reliability
-& $NSSMPath install $ServiceName "cmd.exe" "/c `"$wrapperBatch`""
+# Use full path to cmd.exe and properly quote the batch file
+$cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
+& $NSSMPath install $ServiceName $cmdExe "/c `"$wrapperBatch`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -376,11 +379,11 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
+    $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    $expectedApp = "cmd.exe"
-    if ($currentApp -ne $expectedApp) {
+    if ($currentApp -ne $cmdExe) {
         Write-Host "       Updating application to cmd.exe..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$expectedApp"
+        & $NSSMPath set $ServiceName Application "$cmdExe"
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1

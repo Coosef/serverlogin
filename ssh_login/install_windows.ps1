@@ -332,9 +332,15 @@ if ($webhookConfigured) {
 # Install service using Python directly with proper working directory
 # Use -u flag for unbuffered output (better logging)
 # NSSM will handle the working directory via AppDirectory setting
-# Quote Python path if it contains spaces
-$quotedPythonPath = if ($pythonPath -match '\s') { "`"$pythonPath`"" } else { $pythonPath }
-& $NSSMPath install $ServiceName $quotedPythonPath "-u `"$ScriptPath`""
+# Try to use py launcher if available (more reliable for Windows Store Python)
+$pyLauncher = Join-Path $env:SystemRoot "py.exe"
+if (Test-Path $pyLauncher) {
+    Write-Host "       Using Python launcher (py.exe)..." -ForegroundColor Gray
+    & $NSSMPath install $ServiceName $pyLauncher "-3 -u `"$ScriptPath`""
+} else {
+    # Fallback to direct Python path
+    & $NSSMPath install $ServiceName $pythonPath "-u `"$ScriptPath`""
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -374,18 +380,19 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
-    $quotedPythonPath = if ($pythonPath -match '\s') { "`"$pythonPath`"" } else { $pythonPath }
+    $pyLauncher = Join-Path $env:SystemRoot "py.exe"
+    $usePyLauncher = Test-Path $pyLauncher
+    
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    # Remove quotes for comparison
-    $currentAppClean = $currentApp -replace '^"|"$', ''
-    $pythonPathClean = $pythonPath -replace '^"|"$', ''
-    if ($currentAppClean -ne $pythonPathClean) {
+    $expectedApp = if ($usePyLauncher) { $pyLauncher } else { $pythonPath }
+    
+    if ($currentApp -ne $expectedApp) {
         Write-Host "       Updating Python path..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application $quotedPythonPath
+        & $NSSMPath set $ServiceName Application "$expectedApp"
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    $expectedParams = "-u `"$ScriptPath`""
+    $expectedParams = if ($usePyLauncher) { "-3 -u `"$ScriptPath`"" } else { "-u `"$ScriptPath`"" }
     if ($currentParams -ne $expectedParams) {
         Write-Host "       Updating script parameters..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName AppParameters "$expectedParams"

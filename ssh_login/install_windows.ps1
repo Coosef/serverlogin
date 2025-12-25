@@ -398,7 +398,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-"@
+'@
 
 $pythonScript | Out-File -FilePath $ScriptPath -Encoding UTF8
 Write-Host "       Script oluşturuldu: $ScriptPath" -ForegroundColor Green

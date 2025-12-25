@@ -1,8 +1,12 @@
-# Kullanıcı Aktivite İzleme Sistemi - Windows Server
+﻿# Kullanıcı Aktivite İzleme Sistemi - Windows Server
 # Tek Komutla Otomatik Kurulum
 # Kullanım: PowerShell'i Yönetici olarak açın ve çalıştırın:
 #   .\install_windows.ps1
 # Veya: Invoke-WebRequest -Uri "https://your-domain.com/install_windows.ps1" -OutFile install.ps1; .\install.ps1
+
+# UTF-8 encoding ayarları (Türkçe karakterler için)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ErrorActionPreference = "Stop"
 

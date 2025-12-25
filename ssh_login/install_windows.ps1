@@ -329,16 +329,20 @@ if ($webhookConfigured) {
     Write-Host "       Service will be installed but may not start until WEBHOOK_URL is set" -ForegroundColor Yellow
 }
 
-# Install service using batch file wrapper (Windows Store Python requires this)
-# Create wrapper batch file for reliable service execution
-$wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
-$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
-[System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
-Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
+# Install service using PowerShell wrapper script (most reliable for Windows Store Python)
+# Create PowerShell wrapper script for reliable service execution
+$wrapperScript = Join-Path $InstallDir "start_monitor.ps1"
+$psContent = @"
+# PowerShell wrapper for User Activity Monitor
+Set-Location -Path `"$InstallDir`"
+& `"$pythonPath`" -u `"$ScriptPath`"
+"@
+[System.IO.File]::WriteAllText($wrapperScript, $psContent, [System.Text.Encoding]::UTF8)
+Write-Host "       Created PowerShell wrapper script: $wrapperScript" -ForegroundColor Gray
 
-# NSSM can execute batch files directly - use the batch file as the application
-# NSSM will automatically use cmd.exe to run .bat files
-& $NSSMPath install $ServiceName $wrapperBatch
+# Use PowerShell to run the wrapper script
+$powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+& $NSSMPath install $ServiceName $powershellExe "-ExecutionPolicy Bypass -NoProfile -File `"$wrapperScript`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -378,24 +382,35 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
-    $wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
+    $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $wrapperScript = Join-Path $InstallDir "start_monitor.ps1"
     
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    if ($currentApp -ne $wrapperBatch) {
-        Write-Host "       Updating application to batch file..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$wrapperBatch"
+    if ($currentApp -ne $powershellExe) {
+        Write-Host "       Updating application to PowerShell..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$powershellExe"
     }
     
-    # Ensure batch file exists and is up to date
-    if (-not (Test-Path $wrapperBatch)) {
-        Write-Host "       Recreating wrapper batch file..." -ForegroundColor Gray
-        $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
-        [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
+    $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
+    $expectedParams = "-ExecutionPolicy Bypass -NoProfile -File `"$wrapperScript`""
+    if ($currentParams -ne $expectedParams) {
+        Write-Host "       Updating parameters..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName AppParameters "$expectedParams"
+    }
+    
+    # Ensure PowerShell wrapper script exists and is up to date
+    $psContent = @"
+# PowerShell wrapper for User Activity Monitor
+Set-Location -Path `"$InstallDir`"
+& `"$pythonPath`" -u `"$ScriptPath`"
+"@
+    if (-not (Test-Path $wrapperScript)) {
+        Write-Host "       Creating PowerShell wrapper script..." -ForegroundColor Gray
+        [System.IO.File]::WriteAllText($wrapperScript, $psContent, [System.Text.Encoding]::UTF8)
     } else {
-        # Update batch file content to ensure it's current
-        Write-Host "       Updating wrapper batch file content..." -ForegroundColor Gray
-        $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
-        [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
+        # Update script content to ensure it's current
+        Write-Host "       Updating PowerShell wrapper script content..." -ForegroundColor Gray
+        [System.IO.File]::WriteAllText($wrapperScript, $psContent, [System.Text.Encoding]::UTF8)
     }
     
     # Ensure working directory is set

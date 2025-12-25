@@ -105,6 +105,27 @@ Write-Host "       Script created: $ScriptPath" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[5/8] Creating .env file..." -ForegroundColor Yellow
+
+# Check if .env exists and validate WEBHOOK_URL
+$webhookConfigured = $false
+if (Test-Path $EnvPath) {
+    $envContent = Get-Content $EnvPath -ErrorAction SilentlyContinue
+    $webhookLine = $envContent | Select-String "WEBHOOK_URL"
+    if ($webhookLine) {
+        if ($webhookLine -match 'WEBHOOK_URL="(.*)"') {
+            $webhookUrl = $matches[1]
+            if ($webhookUrl -and $webhookUrl -ne "https://n8vp.yeb.one/webhook/useractivity" -and $webhookUrl -ne "") {
+                $webhookConfigured = $true
+                Write-Host "       WEBHOOK_URL is configured" -ForegroundColor Green
+            } else {
+                Write-Host "       ⚠️  WEBHOOK_URL needs to be configured!" -ForegroundColor Yellow
+            }
+        }
+    } else {
+        Write-Host "       ⚠️  WEBHOOK_URL not found in .env file!" -ForegroundColor Yellow
+    }
+}
+
 if (-not (Test-Path $EnvPath)) {
     $envContent = @"
 # User Activity Monitoring System - Configuration File (Windows)
@@ -174,6 +195,11 @@ MONITOR_FILE_ACCESS=0
     Write-Host ""
 } else {
     Write-Host "       .env file already exists, not overwritten." -ForegroundColor Gray
+    if (-not $webhookConfigured) {
+        Write-Host ""
+        Write-Host "       ⚠️  IMPORTANT: WEBHOOK_URL must be configured before starting the service!" -ForegroundColor Yellow
+        Write-Host "       Edit: notepad $EnvPath" -ForegroundColor White
+    }
 }
 
 Write-Host ""
@@ -279,23 +305,28 @@ if (Test-Path $python313Path) {
 
 Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
 
-# Test Python script before installing service
-Write-Host "       Testing Python script..." -ForegroundColor Gray
-$testProcess = Start-Process -FilePath $pythonPath -ArgumentList $ScriptPath -NoNewWindow -PassThru -RedirectStandardOutput "$LogDir\test_stdout.log" -RedirectStandardError "$LogDir\test_stderr.log"
-Start-Sleep -Seconds 3
-if (-not $testProcess.HasExited) {
-    Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
-    Write-Host "       Script test passed" -ForegroundColor Green
-} else {
-    Write-Host "       Script test failed - checking errors..." -ForegroundColor Yellow
-    if (Test-Path "$LogDir\test_stderr.log") {
-        $errorContent = Get-Content "$LogDir\test_stderr.log" -Tail 5
-        if ($errorContent) {
-            Write-Host "       Error output:" -ForegroundColor Red
-            $errorContent | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+# Test Python script before installing service (only if WEBHOOK_URL is configured)
+if ($webhookConfigured) {
+    Write-Host "       Testing Python script..." -ForegroundColor Gray
+    $testProcess = Start-Process -FilePath $pythonPath -ArgumentList $ScriptPath -NoNewWindow -PassThru -RedirectStandardOutput "$LogDir\test_stdout.log" -RedirectStandardError "$LogDir\test_stderr.log"
+    Start-Sleep -Seconds 3
+    if (-not $testProcess.HasExited) {
+        Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "       Script test passed" -ForegroundColor Green
+    } else {
+        Write-Host "       Script test failed - checking errors..." -ForegroundColor Yellow
+        if (Test-Path "$LogDir\test_stderr.log") {
+            $errorContent = Get-Content "$LogDir\test_stderr.log" -Tail 5
+            if ($errorContent) {
+                Write-Host "       Error output:" -ForegroundColor Red
+                $errorContent | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+            }
         }
+        Write-Host "       Continuing with service installation..." -ForegroundColor Yellow
     }
-    Write-Host "       Continuing with service installation..." -ForegroundColor Yellow
+} else {
+    Write-Host "       ⚠️  Skipping script test - WEBHOOK_URL not configured" -ForegroundColor Yellow
+    Write-Host "       Service will be installed but may not start until WEBHOOK_URL is set" -ForegroundColor Yellow
 }
 
 & $NSSMPath install $ServiceName $pythonPath $ScriptPath

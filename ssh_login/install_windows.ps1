@@ -249,14 +249,28 @@ if (Test-Path $python313Path) {
     # Check if requests is installed for Python 3.13
     $testResult = & $python313Path -c "import requests" 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
-        $pythonPath = $python313Path
+        # Try to get the actual Python executable path (WindowsApps may be a stub)
+        $actualPython = & $python313Path -c "import sys; print(sys.executable)" 2>&1
+        if ($actualPython -and $actualPython -ne $python313Path -and (Test-Path $actualPython)) {
+            Write-Host "       Using actual Python 3.13 path: $actualPython" -ForegroundColor Green
+            $pythonPath = $actualPython.Trim()
+        } else {
+            Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
+            $pythonPath = $python313Path
+        }
     } else {
         Write-Host "       Installing requests for Python 3.13..." -ForegroundColor Yellow
         & $python313Path -m pip install requests --quiet
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
-            $pythonPath = $python313Path
+            # Try to get the actual Python executable path
+            $actualPython = & $python313Path -c "import sys; print(sys.executable)" 2>&1
+            if ($actualPython -and $actualPython -ne $python313Path -and (Test-Path $actualPython)) {
+                Write-Host "       Using actual Python 3.13 path: $actualPython" -ForegroundColor Green
+                $pythonPath = $actualPython.Trim()
+            } else {
+                Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
+                $pythonPath = $python313Path
+            }
         } else {
             Write-Host "       Failed to install requests for Python 3.13, using default Python" -ForegroundColor Yellow
         }

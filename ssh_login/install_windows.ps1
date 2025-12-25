@@ -312,6 +312,13 @@ Write-Host "       Configuring service settings..." -ForegroundColor Gray
 & $NSSMPath set $ServiceName Start SERVICE_AUTO_START
 & $NSSMPath set $ServiceName AppStdout "$LogDir\service_stdout.log"
 & $NSSMPath set $ServiceName AppStderr "$LogDir\service_stderr.log"
+& $NSSMPath set $ServiceName AppRestartDelay 5000
+& $NSSMPath set $ServiceName AppThrottle 1500
+& $NSSMPath set $ServiceName AppStopMethodSkip 0
+& $NSSMPath set $ServiceName AppStopMethodConsole 1500
+& $NSSMPath set $ServiceName AppStopMethodWindow 1500
+& $NSSMPath set $ServiceName AppStopMethodThreads 1500
+& $NSSMPath set $ServiceName AppExitCodeDefault 0
 
 Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow

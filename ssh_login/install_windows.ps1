@@ -241,6 +241,49 @@ if ($existingService) {
 }
 
 Write-Host "       Installing service..." -ForegroundColor Gray
+
+# Check if python3.13 exists and use it if available (for better compatibility)
+$python313Path = "C:\Users\$env:USERNAME\AppData\Local\Microsoft\WindowsApps\python3.13.exe"
+if (Test-Path $python313Path) {
+    Write-Host "       Python 3.13 found, checking requests package..." -ForegroundColor Cyan
+    # Check if requests is installed for Python 3.13
+    $testResult = & $python313Path -c "import requests" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
+        $pythonPath = $python313Path
+    } else {
+        Write-Host "       Installing requests for Python 3.13..." -ForegroundColor Yellow
+        & $python313Path -m pip install requests --quiet
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "       Python 3.13 with requests - using it for service" -ForegroundColor Green
+            $pythonPath = $python313Path
+        } else {
+            Write-Host "       Failed to install requests for Python 3.13, using default Python" -ForegroundColor Yellow
+        }
+    }
+}
+
+Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
+
+# Test Python script before installing service
+Write-Host "       Testing Python script..." -ForegroundColor Gray
+$testProcess = Start-Process -FilePath $pythonPath -ArgumentList $ScriptPath -NoNewWindow -PassThru -RedirectStandardOutput "$LogDir\test_stdout.log" -RedirectStandardError "$LogDir\test_stderr.log"
+Start-Sleep -Seconds 3
+if (-not $testProcess.HasExited) {
+    Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
+    Write-Host "       Script test passed" -ForegroundColor Green
+} else {
+    Write-Host "       Script test failed - checking errors..." -ForegroundColor Yellow
+    if (Test-Path "$LogDir\test_stderr.log") {
+        $errorContent = Get-Content "$LogDir\test_stderr.log" -Tail 5
+        if ($errorContent) {
+            Write-Host "       Error output:" -ForegroundColor Red
+            $errorContent | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+        }
+    }
+    Write-Host "       Continuing with service installation..." -ForegroundColor Yellow
+}
+
 & $NSSMPath install $ServiceName $pythonPath $ScriptPath
 
 if ($LASTEXITCODE -ne 0) {

@@ -329,18 +329,16 @@ if ($webhookConfigured) {
     Write-Host "       Service will be installed but may not start until WEBHOOK_URL is set" -ForegroundColor Yellow
 }
 
-# Install service using Python directly with proper working directory
-# Use -u flag for unbuffered output (better logging)
-# NSSM will handle the working directory via AppDirectory setting
-# Try to use py launcher if available (more reliable for Windows Store Python)
-$pyLauncher = Join-Path $env:SystemRoot "py.exe"
-if (Test-Path $pyLauncher) {
-    Write-Host "       Using Python launcher (py.exe)..." -ForegroundColor Gray
-    & $NSSMPath install $ServiceName $pyLauncher "-3 -u `"$ScriptPath`""
-} else {
-    # Fallback to direct Python path
-    & $NSSMPath install $ServiceName $pythonPath "-u `"$ScriptPath`""
-}
+# Install service using batch file wrapper (Windows Store Python requires this)
+# Create wrapper batch file for reliable service execution
+$wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
+$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
+[System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
+Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
+
+# Use cmd.exe to run the batch file (most reliable for Windows Store Python)
+$cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
+& $NSSMPath install $ServiceName $cmdExe "/c `"$wrapperBatch`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -380,22 +378,27 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
-    $pyLauncher = Join-Path $env:SystemRoot "py.exe"
-    $usePyLauncher = Test-Path $pyLauncher
+    $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
+    $wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
     
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    $expectedApp = if ($usePyLauncher) { $pyLauncher } else { $pythonPath }
-    
-    if ($currentApp -ne $expectedApp) {
-        Write-Host "       Updating Python path..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$expectedApp"
+    if ($currentApp -ne $cmdExe) {
+        Write-Host "       Updating application to cmd.exe..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$cmdExe"
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    $expectedParams = if ($usePyLauncher) { "-3 -u `"$ScriptPath`"" } else { "-u `"$ScriptPath`"" }
+    $expectedParams = "/c `"$wrapperBatch`""
     if ($currentParams -ne $expectedParams) {
-        Write-Host "       Updating script parameters..." -ForegroundColor Gray
+        Write-Host "       Updating parameters to use wrapper batch..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName AppParameters "$expectedParams"
+    }
+    
+    # Ensure batch file exists and is up to date
+    if (-not (Test-Path $wrapperBatch)) {
+        Write-Host "       Recreating wrapper batch file..." -ForegroundColor Gray
+        $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
+        [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
     }
     
     # Ensure working directory is set

@@ -197,14 +197,17 @@ try {
     Write-Host ""
     $exception = $_.Exception
     $errorText = $exception.Message
-    $fullError = "[ERROR] Failed to start service: " + $errorText
+    $errorPrefix = "[ERROR] Failed to start service: "
+    $fullError = $errorPrefix + $errorText
     Write-Host $fullError -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
     $stderrLogPath = Join-Path $LogDir "service_stderr.log"
     $stdoutLogPath = Join-Path $LogDir "service_stdout.log"
-    $stderrCommand = "  Get-Content " + $stderrLogPath
-    $stdoutCommand = "  Get-Content " + $stdoutLogPath
+    $stderrCommandPrefix = "  Get-Content "
+    $stdoutCommandPrefix = "  Get-Content "
+    $stderrCommand = $stderrCommandPrefix + $stderrLogPath
+    $stdoutCommand = $stdoutCommandPrefix + $stdoutLogPath
     Write-Host $stderrCommand -ForegroundColor White
     Write-Host $stdoutCommand -ForegroundColor White
 }

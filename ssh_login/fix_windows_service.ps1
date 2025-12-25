@@ -217,10 +217,9 @@ try {
     Write-Host "Check error logs:" -ForegroundColor Cyan
     $stderrLogPath = Join-Path $LogDir "service_stderr.log"
     $stdoutLogPath = Join-Path $LogDir "service_stdout.log"
-    $stderrCommandPrefix = "  Get-Content "
-    $stdoutCommandPrefix = "  Get-Content "
-    $stderrCommand = $stderrCommandPrefix + $stderrLogPath
-    $stdoutCommand = $stdoutCommandPrefix + $stdoutLogPath
+    $getContentCmd = "Get-Content"
+    $stderrCommand = "  " + $getContentCmd + " " + $stderrLogPath
+    $stdoutCommand = "  " + $getContentCmd + " " + $stdoutLogPath
     Write-Host $stderrCommand -ForegroundColor White
     Write-Host $stdoutCommand -ForegroundColor White
 }

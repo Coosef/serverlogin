@@ -305,6 +305,12 @@ if (Test-Path $python313Path) {
 
 Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
 
+# Create a wrapper batch file for more reliable service execution
+$wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
+$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
+[System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
+Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
+
 # Test Python script before installing service (only if WEBHOOK_URL is configured)
 if ($webhookConfigured) {
     Write-Host "       Testing Python script..." -ForegroundColor Gray
@@ -329,7 +335,8 @@ if ($webhookConfigured) {
     Write-Host "       Service will be installed but may not start until WEBHOOK_URL is set" -ForegroundColor Yellow
 }
 
-& $NSSMPath install $ServiceName $pythonPath $ScriptPath
+# Install service using wrapper batch file for better reliability
+& $NSSMPath install $ServiceName "cmd.exe" "/c `"$wrapperBatch`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red

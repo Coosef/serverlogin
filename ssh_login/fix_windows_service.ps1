@@ -195,17 +195,18 @@ try {
     }
 } catch {
     Write-Host ""
-    $errorMsg = $_.Exception.Message
-    $errorOutput = "[ERROR] Failed to start service: " + $errorMsg
-    Write-Host $errorOutput -ForegroundColor Red
+    $exception = $_.Exception
+    $errorText = $exception.Message
+    $fullError = "[ERROR] Failed to start service: " + $errorText
+    Write-Host $fullError -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
-    $stderrLog = Join-Path $LogDir "service_stderr.log"
-    $stdoutLog = Join-Path $LogDir "service_stdout.log"
-    $stderrCmd = "  Get-Content " + $stderrLog
-    $stdoutCmd = "  Get-Content " + $stdoutLog
-    Write-Host $stderrCmd -ForegroundColor White
-    Write-Host $stdoutCmd -ForegroundColor White
+    $stderrLogPath = Join-Path $LogDir "service_stderr.log"
+    $stdoutLogPath = Join-Path $LogDir "service_stdout.log"
+    $stderrCommand = "  Get-Content " + $stderrLogPath
+    $stdoutCommand = "  Get-Content " + $stdoutLogPath
+    Write-Host $stderrCommand -ForegroundColor White
+    Write-Host $stdoutCommand -ForegroundColor White
 }
 
 Write-Host ""

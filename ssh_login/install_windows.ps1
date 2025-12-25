@@ -307,8 +307,8 @@ Write-Host "       Using Python: $pythonPath" -ForegroundColor Gray
 
 # Create a wrapper batch file for more reliable service execution
 $wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
-# Use simple batch file without quotes in paths (NSSM handles them)
-$batchContent = "@echo off`r`ncd /d $InstallDir`r`n$pythonPath -u $ScriptPath`r`n"
+# Batch file with proper quoting for paths with spaces
+$batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
 [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
 Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
 

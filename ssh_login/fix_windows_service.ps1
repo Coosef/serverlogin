@@ -174,23 +174,23 @@ try {
         Write-Host ""
         Write-Host "Useful Commands:" -ForegroundColor Cyan
         Write-Host "  Service status:  Get-Service $ServiceName" -ForegroundColor White
-        Write-Host "  View logs:       Get-Content $LogDir\service_stderr.log -Tail 20" -ForegroundColor White
-        Write-Host "  View activity:   Get-Content $LogDir\activity_monitor.log -Tail 20" -ForegroundColor White
+        Write-Host "  View logs:       Get-Content `"$LogDir\service_stderr.log`" -Tail 20" -ForegroundColor White
+        Write-Host "  View activity:   Get-Content `"$LogDir\activity_monitor.log`" -Tail 20" -ForegroundColor White
     } else {
         Write-Host ""
         Write-Host "[WARNING] Service did not start" -ForegroundColor Yellow
         Write-Host "         Status: $($service.Status)" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "         Check error logs:" -ForegroundColor Cyan
-        Write-Host "         Get-Content $LogDir\service_stderr.log" -ForegroundColor White
+        Write-Host "         Get-Content `"$LogDir\service_stderr.log`"" -ForegroundColor White
     }
 } catch {
     Write-Host ""
     Write-Host "[ERROR] Failed to start service: $_" -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
-    Write-Host "  Get-Content $LogDir\service_stderr.log" -ForegroundColor White
-    Write-Host "  Get-Content $LogDir\service_stdout.log" -ForegroundColor White
+    Write-Host "  Get-Content `"$LogDir\service_stderr.log`"" -ForegroundColor White
+    Write-Host "  Get-Content `"$LogDir\service_stdout.log`"" -ForegroundColor White
 }
 
 Write-Host ""

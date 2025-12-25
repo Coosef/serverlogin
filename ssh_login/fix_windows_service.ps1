@@ -211,7 +211,7 @@ try {
     Write-Host ""
     $exception = $_.Exception
     $errorText = $exception.Message
-    $errorMsg = $ErrorPrefix + " Failed to start service: " + $errorText
+    $errorMsg = '{0} Failed to start service: {1}' -f $ErrorPrefix, $errorText
     Write-Host $errorMsg -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan

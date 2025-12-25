@@ -336,9 +336,9 @@ $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$Scr
 [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
 Write-Host "       Created wrapper batch file: $wrapperBatch" -ForegroundColor Gray
 
-# Use cmd.exe to run the batch file (most reliable for Windows Store Python)
-$cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
-& $NSSMPath install $ServiceName $cmdExe "/c `"$wrapperBatch`""
+# NSSM can execute batch files directly - use the batch file as the application
+# NSSM will automatically use cmd.exe to run .bat files
+& $NSSMPath install $ServiceName $wrapperBatch
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -378,25 +378,22 @@ try {
     Write-Host "       Verifying service configuration..." -ForegroundColor Gray
     
     # Verify and fix all service settings
-    $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
     $wrapperBatch = Join-Path $InstallDir "start_monitor.bat"
     
     $currentApp = & $NSSMPath get $ServiceName Application 2>&1
-    if ($currentApp -ne $cmdExe) {
-        Write-Host "       Updating application to cmd.exe..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName Application "$cmdExe"
-    }
-    
-    $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    $expectedParams = "/c `"$wrapperBatch`""
-    if ($currentParams -ne $expectedParams) {
-        Write-Host "       Updating parameters to use wrapper batch..." -ForegroundColor Gray
-        & $NSSMPath set $ServiceName AppParameters "$expectedParams"
+    if ($currentApp -ne $wrapperBatch) {
+        Write-Host "       Updating application to batch file..." -ForegroundColor Gray
+        & $NSSMPath set $ServiceName Application "$wrapperBatch"
     }
     
     # Ensure batch file exists and is up to date
     if (-not (Test-Path $wrapperBatch)) {
         Write-Host "       Recreating wrapper batch file..." -ForegroundColor Gray
+        $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
+        [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
+    } else {
+        # Update batch file content to ensure it's current
+        Write-Host "       Updating wrapper batch file content..." -ForegroundColor Gray
         $batchContent = "@echo off`r`ncd /d `"$InstallDir`"`r`n`"$pythonPath`" -u `"$ScriptPath`"`r`n"
         [System.IO.File]::WriteAllText($wrapperBatch, $batchContent, [System.Text.Encoding]::ASCII)
     }

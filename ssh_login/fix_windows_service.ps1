@@ -147,7 +147,10 @@ if (-not $testProcess.HasExited) {
         $errorContent = Get-Content "$LogDir\test_stderr.log" -Tail 5
         if ($errorContent) {
             Write-Host "       Error output:" -ForegroundColor Red
-            $errorContent | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+            $errorContent | ForEach-Object { 
+                $line = $_
+                Write-Host ("         " + $line) -ForegroundColor Red 
+            }
         }
     }
 }
@@ -193,7 +196,8 @@ try {
 } catch {
     Write-Host ""
     $errorMsg = $_.Exception.Message
-    Write-Host "[ERROR] Failed to start service: $errorMsg" -ForegroundColor Red
+    $errorOutput = "[ERROR] Failed to start service: " + $errorMsg
+    Write-Host $errorOutput -ForegroundColor Red
     Write-Host ""
     Write-Host "Check error logs:" -ForegroundColor Cyan
     $stderrLog = Join-Path $LogDir "service_stderr.log"

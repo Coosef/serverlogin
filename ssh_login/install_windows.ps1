@@ -330,8 +330,9 @@ if ($webhookConfigured) {
 }
 
 # Install service using Python directly with proper working directory
+# Use -u flag for unbuffered output (better logging)
 # NSSM will handle the working directory via AppDirectory setting
-& $NSSMPath install $ServiceName $pythonPath "`"$ScriptPath`""
+& $NSSMPath install $ServiceName $pythonPath "-u `"$ScriptPath`""
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
@@ -378,9 +379,9 @@ try {
     }
     
     $currentParams = & $NSSMPath get $ServiceName AppParameters 2>&1
-    $expectedParams = "`"$ScriptPath`""
+    $expectedParams = "-u `"$ScriptPath`""
     if ($currentParams -ne $expectedParams) {
-        Write-Host "       Updating script path..." -ForegroundColor Gray
+        Write-Host "       Updating script parameters..." -ForegroundColor Gray
         & $NSSMPath set $ServiceName AppParameters "$expectedParams"
     }
     

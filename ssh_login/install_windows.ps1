@@ -1,30 +1,30 @@
-﻿﻿# Kullanici Aktivite Izleme Sistemi - Windows Server
-# Tek Komutla Otomatik Kurulum
-# Kullanim: PowerShell'i Yonetici olarak acin ve calistirin:
+﻿﻿# User Activity Monitoring System - Windows Server
+# One-Command Automatic Installation
+# Usage: Open PowerShell as Administrator and run:
 #   .\install_windows.ps1
-# Veya: Invoke-WebRequest -Uri "https://your-domain.com/install_windows.ps1" -OutFile install.ps1; .\install.ps1
+# Or: Invoke-WebRequest -Uri "https://your-domain.com/install_windows.ps1" -OutFile install.ps1; .\install.ps1
 
-# UTF-8 encoding ayarlari (Turkce karakterler icin)
+# UTF-8 encoding settings
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ErrorActionPreference = "Stop"
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Kullanici Aktivite Izleme Sistemi" -ForegroundColor Cyan
-Write-Host "Windows - Otomatik Kurulum" -ForegroundColor Cyan
+Write-Host "User Activity Monitoring System" -ForegroundColor Cyan
+Write-Host "Windows - Automatic Installation" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Yonetici kontrolu
+# Administrator check
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "[HATA] Bu script YONETICI olarak calistirilmalidir!" -ForegroundColor Red
-    Write-Host "PowerShell'i 'Yonetici olarak calistir' ile acin." -ForegroundColor Yellow
+    Write-Host "[ERROR] This script must be run as ADMINISTRATOR!" -ForegroundColor Red
+    Write-Host "Please open PowerShell with 'Run as Administrator'." -ForegroundColor Yellow
     exit 1
 }
 
-# Yapilandirma
+# Configuration
 $InstallDir = "C:\ProgramData\user_activity_monitor"
 $ScriptPath = "$InstallDir\user_activity_monitor.py"
 $EnvPath = "$InstallDir\user_activity_monitor.env"
@@ -32,45 +32,45 @@ $ServiceName = "UserActivityMonitor"
 $NSSMPath = "$InstallDir\nssm.exe"
 $LogDir = "$InstallDir\logs"
 
-Write-Host "[1/8] Python kontrol ediliyor..." -ForegroundColor Yellow
+Write-Host "[1/8] Checking Python..." -ForegroundColor Yellow
 try {
     $pythonVersion = python --version 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "Python bulunamadi"
+        throw "Python not found"
     }
-    Write-Host "       Python bulundu: $pythonVersion" -ForegroundColor Green
+    Write-Host "       Python found: $pythonVersion" -ForegroundColor Green
     $pythonPath = (Get-Command python).Source
-    Write-Host "       Python yolu: $pythonPath" -ForegroundColor Gray
+    Write-Host "       Python path: $pythonPath" -ForegroundColor Gray
 } catch {
-    Write-Host "[HATA] Python bulunamadi!" -ForegroundColor Red
-    Write-Host "       Lutfen Python 3.x kurun: https://www.python.org/downloads/" -ForegroundColor Yellow
-    Write-Host "       Kurulum sirasinda 'Add Python to PATH' secenegini isaretleyin." -ForegroundColor Yellow
+    Write-Host "[ERROR] Python not found!" -ForegroundColor Red
+    Write-Host "       Please install Python 3.x: https://www.python.org/downloads/" -ForegroundColor Yellow
+    Write-Host "       Make sure to check 'Add Python to PATH' during installation." -ForegroundColor Yellow
     exit 1
 }
 
 Write-Host ""
-Write-Host "[2/8] Python paketleri kontrol ediliyor..." -ForegroundColor Yellow
+Write-Host "[2/8] Checking Python packages..." -ForegroundColor Yellow
 try {
     $null = python -c "import requests" 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "       ✓ requests yuklu" -ForegroundColor Green
+        Write-Host "       ✓ requests installed" -ForegroundColor Green
     } else {
-        Write-Host "       requests kuruluyor..." -ForegroundColor Yellow
+        Write-Host "       Installing requests..." -ForegroundColor Yellow
         python -m pip install requests --quiet
-        Write-Host "       ✓ requests kuruldu" -ForegroundColor Green
+        Write-Host "       ✓ requests installed" -ForegroundColor Green
     }
 } catch {
-    Write-Host "[HATA] Paket kurulumu basarisiz!" -ForegroundColor Red
+    Write-Host "[ERROR] Package installation failed!" -ForegroundColor Red
     exit 1
 }
 
 Write-Host ""
-Write-Host "[3/8] Kurulum klasoru olusturuluyor..." -ForegroundColor Yellow
+Write-Host "[3/8] Creating installation directory..." -ForegroundColor Yellow
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Write-Host "       Klasor olusturuldu: $InstallDir" -ForegroundColor Green
+    Write-Host "       Directory created: $InstallDir" -ForegroundColor Green
 } else {
-    Write-Host "       Klasor zaten var: $InstallDir" -ForegroundColor Gray
+    Write-Host "       Directory already exists: $InstallDir" -ForegroundColor Gray
 }
 
 if (-not (Test-Path $LogDir)) {
@@ -78,109 +78,109 @@ if (-not (Test-Path $LogDir)) {
 }
 
 Write-Host ""
-Write-Host "[4/8] Python scripti olusturuluyor..." -ForegroundColor Yellow
+Write-Host "[4/8] Creating Python script..." -ForegroundColor Yellow
 
-# Python script'i GitHub'dan indir (base64 embed sorunlarini onlemek icin)
-Write-Host "       Python script indiriliyor..." -ForegroundColor Gray
+# Download Python script from GitHub (to avoid base64 embed issues)
+Write-Host "       Downloading Python script..." -ForegroundColor Gray
 $pythonScriptUrl = "https://raw.githubusercontent.com/Coosef/serverlogin/main/ssh_login/windows_server/user_activity_monitor.py"
 try {
     Invoke-WebRequest -Uri $pythonScriptUrl -OutFile $ScriptPath -UseBasicParsing -TimeoutSec 30
-    Write-Host "       ✓ Python script indirildi" -ForegroundColor Green
+    Write-Host "       ✓ Python script downloaded" -ForegroundColor Green
 } catch {
-    Write-Host "[HATA] Python script indirilemedi: $_" -ForegroundColor Red
+    Write-Host "[ERROR] Failed to download Python script: $_" -ForegroundColor Red
     Write-Host "URL: $pythonScriptUrl" -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host "       Script olusturuldu: $ScriptPath" -ForegroundColor Green
+Write-Host "       Script created: $ScriptPath" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "[5/8] .env dosyasi olusturuluyor..." -ForegroundColor Yellow
+Write-Host "[5/8] Creating .env file..." -ForegroundColor Yellow
 if (-not (Test-Path $EnvPath)) {
     $envContent = @"
-# Kullanici Aktivite Izleme Sistemi - Yapilandirma Dosyasi (Windows)
-# Degisiklik yaptiktan sonra: Restart-Service UserActivityMonitor
+# User Activity Monitoring System - Configuration File (Windows)
+# After making changes: Restart-Service UserActivityMonitor
 
 # ============================================
-#  ZORUNLU AYARLAR
+#  REQUIRED SETTINGS
 # ============================================
 
-# n8n webhook URL (zorunlu) - BURAYI DUZENLEYIN!
+# n8n webhook URL (required) - EDIT THIS!
 WEBHOOK_URL="https://n8vp.yeb.one/webhook/useractivity"
 
 # ============================================
-#  GUVENLIK AYARLARI
+#  SECURITY SETTINGS
 # ============================================
 
-# Kac basarisiz denemeden sonra IP banlansin?
+# How many failed attempts before IP is banned?
 MAX_ATTEMPTS=5
 
-# Kac saniyelik zaman penceresi icinde sayilacak? (orn: 120 = 2 dakika)
+# Time window in seconds for counting attempts (e.g., 120 = 2 minutes)
 TIME_WINDOW_SEC=120
 
-# Ban suresi (saniye) - simdilik sadece bilgi amacli
+# Ban duration (seconds) - currently informational only
 BAN_DURATION=3600
 
-# Banlanmayacak IP'ler (virgulle ayrilmis)
-# Ornek: WHITELIST_IPS="1.2.3.4,5.6.7.8"
+# IPs that should not be banned (comma-separated)
+# Example: WHITELIST_IPS="1.2.3.4,5.6.7.8"
 WHITELIST_IPS=""
 
 # ============================================
-#  SUNUCU BILGILERI
+#  SERVER INFORMATION
 # ============================================
 
-# Sunucu adi (bos birakirsan hostname kullanilir)
+# Server name (leave empty to use hostname)
 SERVER_NAME=""
 
-# Sunucu IP (bos birakirsan otomatik tespit edilir)
+# Server IP (leave empty for automatic detection)
 SERVER_IP=""
 
-# Ortam bilgisi (Production, Staging, Development vb.)
+# Environment information (Production, Staging, Development, etc.)
 SERVER_ENV="Production"
 
 # ============================================
-#  IZLEME AYARLARI
+#  MONITORING SETTINGS
 # ============================================
 
-# Basarili girisler icin de bildirim gonderilsin mi? (1 = evet, 0 = hayir)
+# Send notifications for successful logins? (1 = yes, 0 = no)
 ALERT_ON_SUCCESS=1
 
-# PowerShell komut gecmisini izle? (1 = evet, 0 = hayir)
+# Monitor PowerShell command history? (1 = yes, 0 = no)
 MONITOR_COMMANDS=1
 
-# Process olusturma olaylarini izle? (1 = evet, 0 = hayir)
+# Monitor process creation events? (1 = yes, 0 = no)
 MONITOR_PROCESSES=1
 
-# Login/logout olaylarini izle? (1 = evet, 0 = hayir)
+# Monitor login/logout events? (1 = yes, 0 = no)
 MONITOR_LOGINS=1
 
-# Dosya erisimlerini izle? (1 = evet, 0 = hayir) - File System Audit gerekir
+# Monitor file access? (1 = yes, 0 = no) - Requires File System Audit
 MONITOR_FILE_ACCESS=0
 "@
     $envContent | Out-File -FilePath $EnvPath -Encoding UTF8
-    Write-Host "       .env dosyasi olusturuldu: $EnvPath" -ForegroundColor Green
+    Write-Host "       .env file created: $EnvPath" -ForegroundColor Green
     Write-Host ""
-    Write-Host "       ⚠️  ONEMLI: WEBHOOK_URL'i duzenlemeniz gerekiyor!" -ForegroundColor Yellow
-    Write-Host "       Dosya: $EnvPath" -ForegroundColor Yellow
+    Write-Host "       ⚠️  IMPORTANT: You need to edit WEBHOOK_URL!" -ForegroundColor Yellow
+    Write-Host "       File: $EnvPath" -ForegroundColor Yellow
     Write-Host ""
 } else {
-    Write-Host "       .env dosyasi zaten var, uzerine yazilmadi." -ForegroundColor Gray
+    Write-Host "       .env file already exists, not overwritten." -ForegroundColor Gray
 }
 
 Write-Host ""
-Write-Host "[6/8] NSSM kontrol ediliyor..." -ForegroundColor Yellow
+Write-Host "[6/8] Checking NSSM..." -ForegroundColor Yellow
 if (-not (Test-Path $NSSMPath)) {
-    Write-Host "       NSSM bulunamadi." -ForegroundColor Yellow
+    Write-Host "       NSSM not found." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "       NSSM'i otomatik indirmeyi deniyoruz..." -ForegroundColor Cyan
+    Write-Host "       Attempting to download NSSM automatically..." -ForegroundColor Cyan
     
-    # NSSM'i otomatik indirmeyi dene
+    # Try to download NSSM automatically
     $nssmUrl = "https://nssm.cc/release/nssm-2.24.zip"
     $nssmZip = "$InstallDir\nssm.zip"
     $nssmExtract = "$InstallDir\nssm_extract"
     
     try {
-        Write-Host "       NSSM indiriliyor..." -ForegroundColor Gray
+        Write-Host "       Downloading NSSM..." -ForegroundColor Gray
         Invoke-WebRequest -Uri $nssmUrl -OutFile $nssmZip -UseBasicParsing -TimeoutSec 30
         Expand-Archive -Path $nssmZip -DestinationPath $nssmExtract -Force
         $nssmExe = Get-ChildItem -Path $nssmExtract -Recurse -Filter "nssm.exe" | Select-Object -First 1
@@ -188,58 +188,58 @@ if (-not (Test-Path $NSSMPath)) {
             Copy-Item $nssmExe.FullName -Destination $NSSMPath -Force
             Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
             Remove-Item $nssmExtract -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "       ✓ NSSM otomatik indirildi ve kuruldu" -ForegroundColor Green
+            Write-Host "       ✓ NSSM downloaded and installed automatically" -ForegroundColor Green
         } else {
-            throw "nssm.exe bulunamadi"
+            throw "nssm.exe not found"
         }
     } catch {
-        Write-Host "       ⚠️  Otomatik indirme basarisiz, manuel kurulum gerekli" -ForegroundColor Yellow
+        Write-Host "       ⚠️  Automatic download failed, manual installation required" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "       Manuel kurulum:" -ForegroundColor Cyan
-        Write-Host "       1. https://nssm.cc/download adresinden indirin" -ForegroundColor White
-        Write-Host "       2. nssm.exe dosyasini suraya kopyalayin:" -ForegroundColor White
+        Write-Host "       Manual installation:" -ForegroundColor Cyan
+        Write-Host "       1. Download from https://nssm.cc/download" -ForegroundColor White
+        Write-Host "       2. Copy nssm.exe to:" -ForegroundColor White
         Write-Host "          $NSSMPath" -ForegroundColor White
         Write-Host ""
-        Write-Host "       Alternatif: Chocolatey ile kurulum:" -ForegroundColor Cyan
+        Write-Host "       Alternative: Install with Chocolatey:" -ForegroundColor Cyan
         Write-Host "       choco install nssm" -ForegroundColor White
         Write-Host ""
         
-        $continue = Read-Host "       NSSM'i manuel olarak indirdiniz mi? (E/H)"
-        if ($continue -ne "E" -and $continue -ne "e") {
-            Write-Host "[HATA] NSSM gerekli, kurulum iptal edildi." -ForegroundColor Red
+        $continue = Read-Host "       Have you manually downloaded NSSM? (Y/N)"
+        if ($continue -ne "Y" -and $continue -ne "y") {
+            Write-Host "[ERROR] NSSM is required, installation cancelled." -ForegroundColor Red
             exit 1
         }
         
         if (-not (Test-Path $NSSMPath)) {
-            Write-Host "[HATA] NSSM hala bulunamadi: $NSSMPath" -ForegroundColor Red
+            Write-Host "[ERROR] NSSM still not found: $NSSMPath" -ForegroundColor Red
             exit 1
         }
     }
 } else {
-    Write-Host "       ✓ NSSM bulundu" -ForegroundColor Green
+    Write-Host "       ✓ NSSM found" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "[7/8] Windows Service kuruluyor..." -ForegroundColor Yellow
+Write-Host "[7/8] Installing Windows Service..." -ForegroundColor Yellow
 
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existingService) {
-    Write-Host "       Mevcut servis durduruluyor..." -ForegroundColor Gray
+    Write-Host "       Stopping existing service..." -ForegroundColor Gray
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
-    Write-Host "       Mevcut servis kaldiriliyor..." -ForegroundColor Gray
+    Write-Host "       Removing existing service..." -ForegroundColor Gray
     & $NSSMPath remove $ServiceName confirm
 }
 
-Write-Host "       Servis yukleniyor..." -ForegroundColor Gray
+Write-Host "       Installing service..." -ForegroundColor Gray
 & $NSSMPath install $ServiceName $pythonPath $ScriptPath
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[HATA] Servis kurulumu basarisiz!" -ForegroundColor Red
+    Write-Host "[ERROR] Service installation failed!" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "       Servis ayarlari yapilandiriliyor..." -ForegroundColor Gray
+Write-Host "       Configuring service settings..." -ForegroundColor Gray
 & $NSSMPath set $ServiceName AppDirectory $InstallDir
 & $NSSMPath set $ServiceName DisplayName "User Activity Monitor"
 & $NSSMPath set $ServiceName Description "Comprehensive User Activity Monitor with n8n webhook and auto-ban for Windows"
@@ -248,7 +248,7 @@ Write-Host "       Servis ayarlari yapilandiriliyor..." -ForegroundColor Gray
 & $NSSMPath set $ServiceName AppStderr "$LogDir\service_stderr.log"
 
 Write-Host ""
-Write-Host "[8/8] Servis baslatiliyor..." -ForegroundColor Yellow
+Write-Host "[8/8] Starting service..." -ForegroundColor Yellow
 Start-Service -Name $ServiceName
 
 Start-Sleep -Seconds 2
@@ -257,37 +257,36 @@ $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($service -and $service.Status -eq "Running") {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
-    Write-Host "✓ Kurulum basariyla tamamlandi!" -ForegroundColor Green
+    Write-Host "✓ Installation completed successfully!" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Servis Bilgileri:" -ForegroundColor Cyan
-    Write-Host "  Adi: $ServiceName" -ForegroundColor White
-    Write-Host "  Durum: $($service.Status)" -ForegroundColor White
+    Write-Host "Service Information:" -ForegroundColor Cyan
+    Write-Host "  Name: $ServiceName" -ForegroundColor White
+    Write-Host "  Status: $($service.Status)" -ForegroundColor White
     Write-Host "  Script: $ScriptPath" -ForegroundColor White
     Write-Host "  Config: $EnvPath" -ForegroundColor White
-    Write-Host "  Loglar: $LogDir" -ForegroundColor White
+    Write-Host "  Logs: $LogDir" -ForegroundColor White
     Write-Host ""
-    Write-Host "Yararli Komutlar:" -ForegroundColor Cyan
-    Write-Host "  Servis durumu:     Get-Service $ServiceName" -ForegroundColor White
-    Write-Host "  Servis durdur:     Stop-Service $ServiceName" -ForegroundColor White
-    Write-Host "  Servis baslat:     Start-Service $ServiceName" -ForegroundColor White
-    Write-Host "  Servis yeniden:    Restart-Service $ServiceName" -ForegroundColor White
-    Write-Host "  Loglari goruntule: Get-Content $LogDir\activity_monitor.log -Tail 50" -ForegroundColor White
+    Write-Host "Useful Commands:" -ForegroundColor Cyan
+    Write-Host "  Service status:     Get-Service $ServiceName" -ForegroundColor White
+    Write-Host "  Stop service:       Stop-Service $ServiceName" -ForegroundColor White
+    Write-Host "  Start service:      Start-Service $ServiceName" -ForegroundColor White
+    Write-Host "  Restart service:    Restart-Service $ServiceName" -ForegroundColor White
+    Write-Host "  View logs:          Get-Content $LogDir\activity_monitor.log -Tail 50" -ForegroundColor White
     Write-Host ""
-    Write-Host "⚠️  ONEMLI: .env dosyasinda WEBHOOK_URL'i duzenleyin!" -ForegroundColor Yellow
-    Write-Host "   Dosya: $EnvPath" -ForegroundColor Yellow
-    Write-Host "   Duzenleme sonrasi: Restart-Service $ServiceName" -ForegroundColor Yellow
+    Write-Host "⚠️  IMPORTANT: Edit WEBHOOK_URL in .env file!" -ForegroundColor Yellow
+    Write-Host "   File: $EnvPath" -ForegroundColor Yellow
+    Write-Host "   After editing: Restart-Service $ServiceName" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "📝 Ornek:" -ForegroundColor Cyan
+    Write-Host "📝 Example:" -ForegroundColor Cyan
     Write-Host "   notepad $EnvPath" -ForegroundColor White
-    Write-Host "   # WEBHOOK_URL=`"https://your-n8n-url.com/webhook/...`" satirini duzenleyin" -ForegroundColor White
+    Write-Host "   # Edit the line: WEBHOOK_URL=`"https://your-n8n-url.com/webhook/...`"" -ForegroundColor White
     Write-Host "   Restart-Service $ServiceName" -ForegroundColor White
     Write-Host ""
 } else {
     Write-Host ""
-    Write-Host "[UYARI] Servis kuruldu ancak baslatilamadi!" -ForegroundColor Yellow
-    Write-Host "        Lutfen manuel olarak kontrol edin:" -ForegroundColor Yellow
-    Write-Host "        Get-Service $ServiceName" -ForegroundColor White
-    Write-Host "        Get-Content $LogDir\service_stderr.log" -ForegroundColor White
+    Write-Host "[WARNING] Service installed but could not be started!" -ForegroundColor Yellow
+    Write-Host "         Please check manually:" -ForegroundColor Yellow
+    Write-Host "         Get-Service $ServiceName" -ForegroundColor White
+    Write-Host "         Get-Content $LogDir\service_stderr.log" -ForegroundColor White
 }
-

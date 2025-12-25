@@ -204,7 +204,8 @@ def track_fail_and_check_ban(ip: str, now_ts: float, time_window: int, max_attem
 
 def read_windows_events(log_name: str, event_ids: list, max_events: int = 100):
     event_ids_str = ",".join(map(str, event_ids))
-    ps_script = f"Get-WinEvent -LogName `"{log_name}`" -MaxEvents {max_events} -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -in @({event_ids_str}) }} | ForEach-Object {{ $time = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'); $id = $_.Id; $msg = $_.Message; $xml = $_.ToXml(); Write-Output \"$time|$id|$xml|$msg\" }}"
+    # PowerShell script'inde $ karakterlerini escape et
+    ps_script = f"Get-WinEvent -LogName `"{log_name}`" -MaxEvents {max_events} -ErrorAction SilentlyContinue | Where-Object {{ `$_.Id -in @({event_ids_str}) }} | ForEach-Object {{ `$time = `$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'); `$id = `$_.Id; `$msg = `$_.Message; `$xml = `$_.ToXml(); Write-Output \"`$time|`$id|`$xml|`$msg\" }}"
     try:
         result = subprocess.run(["powershell", "-Command", ps_script], capture_output=True, text=True, timeout=10)
         return result.stdout
@@ -396,7 +397,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-'@
+"@
 
 $pythonScript | Out-File -FilePath $ScriptPath -Encoding UTF8
 Write-Host "       Script oluşturuldu: $ScriptPath" -ForegroundColor Green

@@ -308,4 +308,27 @@ if ($service -and $service.Status -eq "Running") {
     Write-Host "         Please check manually:" -ForegroundColor Yellow
     Write-Host "         Get-Service $ServiceName" -ForegroundColor White
     Write-Host "         Get-Content $LogDir\service_stderr.log" -ForegroundColor White
+    Write-Host ""
+    Write-Host "         Testing Python script manually..." -ForegroundColor Cyan
+    Write-Host "         Running: python $ScriptPath" -ForegroundColor Gray
+    try {
+        $testOutput = python $ScriptPath 2>&1 | Select-Object -First 10
+        if ($testOutput) {
+            Write-Host "         Script output:" -ForegroundColor Yellow
+            $testOutput | ForEach-Object { Write-Host "           $_" -ForegroundColor Red }
+        }
+    } catch {
+        Write-Host "         Could not test script: $_" -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Host "         Common issues:" -ForegroundColor Cyan
+    Write-Host "         1. WEBHOOK_URL not set in .env file" -ForegroundColor White
+    Write-Host "         2. Python script has errors" -ForegroundColor White
+    Write-Host "         3. Missing Python packages" -ForegroundColor White
+    Write-Host ""
+    Write-Host "         To fix:" -ForegroundColor Cyan
+    Write-Host "         1. Edit: notepad $EnvPath" -ForegroundColor White
+    Write-Host "         2. Set WEBHOOK_URL to your n8n webhook URL" -ForegroundColor White
+    Write-Host "         3. Test: python $ScriptPath" -ForegroundColor White
+    Write-Host "         4. Start: Start-Service $ServiceName" -ForegroundColor White
 }

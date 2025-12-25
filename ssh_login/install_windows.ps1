@@ -349,12 +349,14 @@ Write-Host "       Configuring service settings..." -ForegroundColor Gray
 & $NSSMPath set $ServiceName AppStopMethodConsole 1500
 & $NSSMPath set $ServiceName AppStopMethodWindow 1500
 & $NSSMPath set $ServiceName AppStopMethodThreads 1500
-& $NSSMPath set $ServiceName AppExitCodeDefault 0
 
 # Set environment variables for Python
 $pythonDir = Split-Path $pythonPath -Parent
 $pythonPathEnv = "$pythonDir;" + $env:PATH
 & $NSSMPath set $ServiceName AppEnvironmentExtra "PATH=$pythonPathEnv"
+
+# Use unbuffered Python output for better logging
+& $NSSMPath set $ServiceName AppParameters "-u `"$ScriptPath`""
 
 Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow

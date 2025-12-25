@@ -10,6 +10,15 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ErrorActionPreference = "Stop"
 
+# Fix BOM issue if script was downloaded with BOM
+$scriptContent = Get-Content $PSCommandPath -Raw -Encoding UTF8
+if ($scriptContent -match '^\xEF\xBB\xBF') {
+    $scriptContent = $scriptContent.Substring(3)
+    Set-Content -Path $PSCommandPath -Value $scriptContent -Encoding UTF8 -NoNewline
+    & $PSCommandPath
+    exit
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "User Activity Monitoring System" -ForegroundColor Cyan
 Write-Host "Windows - Automatic Installation" -ForegroundColor Cyan

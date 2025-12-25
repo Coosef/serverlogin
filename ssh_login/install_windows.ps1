@@ -76,329 +76,396 @@ if (-not (Test-Path $LogDir)) {
 Write-Host ""
 Write-Host "[4/8] Python scripti oluşturuluyor..." -ForegroundColor Yellow
 
-# Python script içeriği (here-string ile)
-$pythonScript = @'
-#!/usr/bin/env python3
-"""
-Kapsamlı Kullanıcı Aktivite İzleme Sistemi - Windows Server
-Tüm kullanıcı aktivitelerini izler: login, logout, process, file access, registry
-"""
-
-import os
-import re
-import json
-import time
-import socket
-import subprocess
-import logging
-import threading
-from datetime import datetime, timezone
-from collections import defaultdict, deque
-
-try:
-    import requests
-except ImportError:
-    print("[ERROR] 'requests' paketi bulunamadı. Lütfen 'pip install requests' çalıştırın.")
-    exit(1)
-
-ENV_PATH = r"C:\ProgramData\user_activity_monitor\user_activity_monitor.env"
-LOG_DIR = r"C:\ProgramData\user_activity_monitor\logs"
-LOG_FILE = os.path.join(LOG_DIR, "activity_monitor.log")
-
-os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-
-EVENT_LOGON_SUCCESS = 4624
-EVENT_LOGON_FAILED = 4625
-EVENT_LOGOFF = 4634
-EVENT_PROCESS_CREATE = 4688
-EVENT_FILE_ACCESS = 4663
-
-fail_events = defaultdict(deque)
-
-def load_env(path: str) -> dict:
-    env = {}
-    if not os.path.exists(path):
-        logging.warning(f"[WARN] Env dosyası bulunamadı: {path}")
-        return env
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                env[key] = value
-        logging.info(f"[INFO] Env dosyası yüklendi: {path}")
-    except Exception as e:
-        logging.error(f"[ERROR] Env dosyası okunurken hata: {e}")
-    return env
-
-def get_primary_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-def ban_ip_windows(ip: str, ssh_port: int = 22):
-    try:
-        rule_name = f"SSH_BAN_{ip.replace('.', '_')}"
-        check_cmd = ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"]
-        result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-        if "No rules match" in result.stdout or result.returncode != 0:
-            add_cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule_name}", "dir=in", "action=block", f"remoteip={ip}", "protocol=tcp", f"localport={ssh_port}", "enable=yes"]
-            subprocess.run(add_cmd, check=False, capture_output=True, timeout=5)
-            logging.info(f"[BAN] {ip} Windows Firewall ile banlandı")
-            return True
-        return False
-    except Exception as e:
-        logging.error(f"[ERROR] IP banlama hatası ({ip}): {e}")
-        return False
-
-def send_to_webhook(webhook_url: str, payload: dict, max_retries: int = 3):
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(webhook_url, json=payload, timeout=5)
-            r.raise_for_status()
-            logging.debug(f"[WEBHOOK] Başarılı: {payload.get('event_type')}")
-            return True
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1:
-                logging.warning(f"[WEBHOOK] Deneme {attempt + 1}/{max_retries} başarısız...")
-                time.sleep(2)
-            else:
-                logging.error(f"[WEBHOOK] {max_retries} deneme sonrası başarısız: {e}")
-                error_log = os.path.join(LOG_DIR, "webhook_errors.log")
-                try:
-                    with open(error_log, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "error": str(e), "payload": payload}) + "\n")
-                except Exception:
-                    pass
-                return False
-    return False
-
-def track_fail_and_check_ban(ip: str, now_ts: float, time_window: int, max_attempts: int):
-    dq = fail_events[ip]
-    dq.append(now_ts)
-    cutoff = now_ts - time_window
-    while dq and dq[0] < cutoff:
-        dq.popleft()
-    fail_count = len(dq)
-    ban_triggered = fail_count >= max_attempts
-    return fail_count, ban_triggered
-
-def read_windows_events(log_name: str, event_ids: list, max_events: int = 100):
-    event_ids_str = ",".join(map(str, event_ids))
-    # PowerShell script - $ karakterleri here-string içinde literal olarak kalacak
-    ps_template = 'Get-WinEvent -LogName "{log_name}" -MaxEvents {max_events} -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -in @({event_ids}) }} | ForEach-Object {{ $time = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss"); $id = $_.Id; $msg = $_.Message; $xml = $_.ToXml(); Write-Output "$time|$id|$xml|$msg" }}'
-    ps_script = ps_template.format(log_name=log_name, max_events=max_events, event_ids=event_ids_str)
-    try:
-        result = subprocess.run(["powershell", "-Command", ps_script], capture_output=True, text=True, timeout=10)
-        return result.stdout
-    except Exception as e:
-        logging.error(f"[ERROR] PowerShell event okuma hatası: {e}")
-        return ""
-
-def parse_event_xml(xml_str: str):
-    data = {}
-    try:
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(xml_str)
-        for data_elem in root.findall(".//{http://schemas.microsoft.com/win/2004/08/events/event}Data"):
-            name = data_elem.get("Name", "")
-            value = data_elem.text or ""
-            if name:
-                data[name.lower()] = value
-        system = root.find(".//{http://schemas.microsoft.com/win/2004/08/events/event}System")
-        if system is not None:
-            event_id_elem = system.find(".//{http://schemas.microsoft.com/win/2004/08/events/event}EventID")
-            if event_id_elem is not None:
-                data["event_id"] = event_id_elem.text
-    except Exception as e:
-        logging.debug(f"[DEBUG] XML parse hatası: {e}")
-    return data
-
-def follow_windows_events():
-    last_event_times = {"Security": datetime.now(timezone.utc), "OpenSSH/Operational": datetime.now(timezone.utc)}
-    security_events = [EVENT_LOGON_SUCCESS, EVENT_LOGON_FAILED, EVENT_LOGOFF, EVENT_PROCESS_CREATE, EVENT_FILE_ACCESS]
-    ssh_events = [4, 5, 6]
-    while True:
-        try:
-            events = read_windows_events("Security", security_events, 50)
-            for line in events.strip().split("\n"):
-                if not line or "|" not in line:
-                    continue
-                try:
-                    parts = line.split("|", 3)
-                    if len(parts) < 4:
-                        continue
-                    event_time_str, event_id, xml_data, message = parts
-                    event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
-                    event_time = event_time.replace(tzinfo=timezone.utc)
-                    if event_time > last_event_times["Security"]:
-                        event_data = parse_event_xml(xml_data)
-                        event_data["event_id"] = event_id
-                        event_data["time"] = event_time
-                        event_data["message"] = message
-                        event_data["log_name"] = "Security"
-                        yield event_data
-                        last_event_times["Security"] = event_time
-                except Exception as e:
-                    logging.debug(f"[DEBUG] Event parse hatası: {e}")
-                    continue
-            events = read_windows_events("OpenSSH/Operational", ssh_events, 50)
-            for line in events.strip().split("\n"):
-                if not line or "|" not in line:
-                    continue
-                try:
-                    parts = line.split("|", 3)
-                    if len(parts) < 4:
-                        continue
-                    event_time_str, event_id, xml_data, message = parts
-                    event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
-                    event_time = event_time.replace(tzinfo=timezone.utc)
-                    if event_time > last_event_times["OpenSSH/Operational"]:
-                        event_data = parse_event_xml(xml_data)
-                        event_data["event_id"] = event_id
-                        event_data["time"] = event_time
-                        event_data["message"] = message
-                        event_data["log_name"] = "OpenSSH/Operational"
-                        yield event_data
-                        last_event_times["OpenSSH/Operational"] = event_time
-                except Exception as e:
-                    logging.debug(f"[DEBUG] SSH event parse hatası: {e}")
-                    continue
-            time.sleep(5)
-        except Exception as e:
-            logging.error(f"[ERROR] Event izleme hatası: {e}")
-            time.sleep(10)
-
-def main():
-    logging.info("=" * 60)
-    logging.info("Kullanıcı Aktivite İzleme Sistemi - Windows Server")
-    logging.info("=" * 60)
-    env = load_env(ENV_PATH)
-    webhook_url = env.get("WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        logging.error("[FATAL] WEBHOOK_URL .env dosyasında tanımlı değil!")
-        logging.error(f"[FATAL] Lütfen {ENV_PATH} dosyasını düzenleyin.")
-        return
-    hostname = socket.gethostname()
-    primary_ip = get_primary_ip()
-    server_name = env.get("SERVER_NAME", "").strip() or hostname
-    server_ip = env.get("SERVER_IP", "").strip() or primary_ip
-    server_env = env.get("SERVER_ENV", "Production")
-    max_attempts = int(env.get("MAX_ATTEMPTS", "5"))
-    time_window_sec = int(env.get("TIME_WINDOW_SEC", "120"))
-    ban_duration = int(env.get("BAN_DURATION", "3600"))
-    alert_on_success = env.get("ALERT_ON_SUCCESS", "1") in ("1", "true", "True", "YES", "yes")
-    monitor_commands = env.get("MONITOR_COMMANDS", "1") in ("1", "true", "True", "YES", "yes")
-    monitor_processes = env.get("MONITOR_PROCESSES", "1") in ("1", "true", "True", "YES", "yes")
-    monitor_logins = env.get("MONITOR_LOGINS", "1") in ("1", "true", "True", "YES", "yes")
-    monitor_file_access = env.get("MONITOR_FILE_ACCESS", "0") in ("1", "true", "True", "YES", "yes")
-    whitelist_ips = []
-    whitelist_str = env.get("WHITELIST_IPS", "").strip()
-    if whitelist_str:
-        whitelist_ips = [ip.strip() for ip in whitelist_str.split(",") if ip.strip()]
-    logging.info(f"[INFO] Webhook URL: {webhook_url}")
-    logging.info(f"[INFO] Sunucu: {server_name} ({server_ip}) | Ortam: {server_env}")
-    logging.info(f"[INFO] Eşik: {max_attempts} deneme / {time_window_sec} saniye")
-    logging.info(f"[INFO] İzleme: Komutlar={monitor_commands}, Process={monitor_processes}, Login={monitor_logins}")
-    logging.info("[INFO] Windows Event Log izleme başlatılıyor...")
-    try:
-        for event in follow_windows_events():
-            event_id = int(event.get("event_id", 0))
-            event_time = event.get("time", datetime.now(timezone.utc))
-            message = event.get("message", "")
-            base_payload = {"timestamp": event_time.isoformat(), "service": "user_activity", "server_name": server_name, "server_ip": server_ip, "server_env": server_env, "event_id": event_id, "raw_log": message}
-            now_ts = event_time.timestamp()
-            if event_id == EVENT_LOGON_SUCCESS:
-                if not monitor_logins:
-                    continue
-                username = event.get("targetusername", event.get("subjectusername", ""))
-                ip = event.get("ipaddress", event.get("ip", ""))
-                logon_type = event.get("logontype", "")
-                if alert_on_success and ip and ip not in whitelist_ips:
-                    base_payload.update({"event_type": "logon_success", "user": username, "ip": ip, "logon_type": logon_type})
-                    send_to_webhook(webhook_url, base_payload)
-                    logging.info(f"[LOGON] {username} @ {ip}")
-            elif event_id == EVENT_LOGON_FAILED:
-                if not monitor_logins:
-                    continue
-                username = event.get("targetusername", event.get("subjectusername", ""))
-                ip = event.get("ipaddress", event.get("ip", ""))
-                if ip and ip not in whitelist_ips:
-                    fail_count, ban_triggered = track_fail_and_check_ban(ip, now_ts, time_window_sec, max_attempts)
-                    if ban_triggered:
-                        ban_ip_windows(ip)
-                    base_payload.update({"event_type": "logon_failed", "user": username, "ip": ip, "fail_count_window": fail_count, "ban_triggered": ban_triggered})
-                    send_to_webhook(webhook_url, base_payload)
-                    logging.warning(f"[LOGON FAILED] {username} @ {ip}")
-            elif event_id == EVENT_LOGOFF:
-                if monitor_logins:
-                    username = event.get("targetusername", event.get("subjectusername", ""))
-                    base_payload.update({"event_type": "logoff", "user": username})
-                    send_to_webhook(webhook_url, base_payload)
-            elif event_id == EVENT_PROCESS_CREATE:
-                if monitor_processes:
-                    username = event.get("subjectusername", "")
-                    process_name = event.get("processname", "")
-                    command_line = event.get("commandline", "")
-                    base_payload.update({"event_type": "process_create", "user": username, "process_name": process_name, "command_line": command_line})
-                    send_to_webhook(webhook_url, base_payload)
-                    logging.info(f"[PROCESS] {username}: {process_name}")
-            elif event_id == EVENT_FILE_ACCESS:
-                if monitor_file_access:
-                    username = event.get("subjectusername", "")
-                    object_name = event.get("objectname", "")
-                    base_payload.update({"event_type": "file_access", "user": username, "file_path": object_name})
-                    send_to_webhook(webhook_url, base_payload)
-            elif event.get("log_name") == "OpenSSH/Operational":
-                if "failed" in message.lower() or "invalid" in message.lower():
-                    ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)", message)
-                    user_match = re.search(r"user[:\s]+(\S+)", message, re.IGNORECASE)
-                    if ip_match and user_match:
-                        ip = ip_match.group(1)
-                        user = user_match.group(1)
-                        if ip not in whitelist_ips:
-                            fail_count, ban_triggered = track_fail_and_check_ban(ip, now_ts, time_window_sec, max_attempts)
-                            if ban_triggered:
-                                ban_ip_windows(ip)
-                            base_payload.update({"event_type": "ssh_failed_login", "user": user, "ip": ip, "fail_count_window": fail_count, "ban_triggered": ban_triggered})
-                            send_to_webhook(webhook_url, base_payload)
-                elif "accepted" in message.lower():
-                    ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)", message)
-                    user_match = re.search(r"user[:\s]+(\S+)", message, re.IGNORECASE)
-                    if ip_match and user_match and alert_on_success:
-                        ip = ip_match.group(1)
-                        user = user_match.group(1)
-                        if ip in fail_events:
-                            fail_events[ip].clear()
-                        base_payload.update({"event_type": "ssh_success_login", "user": user, "ip": ip})
-                        send_to_webhook(webhook_url, base_payload)
-    except KeyboardInterrupt:
-        logging.info("[INFO] Kullanıcı tarafından durduruldu.")
-    except Exception as e:
-        logging.error(f"[FATAL] Beklenmeyen hata: {e}", exc_info=True)
-
-if __name__ == "__main__":
-    main()
+# Python script içeriği (base64 encoded - PowerShell parser sorunlarını önlemek için)
+$pythonScriptBase64 = @'
+IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKS2Fwc2FtbMSxIEt1bGxhbsSxY8SxIEFrdGl2aXRlIMSw
+emxlbWUgU2lzdGVtaSAtIFdpbmRvd3MgU2VydmVyClTDvG0ga3VsbGFuxLFjxLEgYWt0aXZpdGVsZXJp
+bmkgaXpsZXI6IGxvZ2luLCBsb2dvdXQsIHByb2Nlc3MsIGZpbGUgYWNjZXNzLCByZWdpc3RyeQoiIiIK
+CmltcG9ydCBvcwppbXBvcnQgcmUKaW1wb3J0IGpzb24KaW1wb3J0IHRpbWUKaW1wb3J0IHNvY2tldApp
+bXBvcnQgc3VicHJvY2VzcwppbXBvcnQgbG9nZ2luZwppbXBvcnQgdGhyZWFkaW5nCmZyb20gZGF0ZXRp
+bWUgaW1wb3J0IGRhdGV0aW1lLCB0aW1lem9uZQpmcm9tIGNvbGxlY3Rpb25zIGltcG9ydCBkZWZhdWx0
+ZGljdCwgZGVxdWUKCnRyeToKICAgIGltcG9ydCByZXF1ZXN0cwpleGNlcHQgSW1wb3J0RXJyb3I6CiAg
+ICBwcmludCgiW0VSUk9SXSAncmVxdWVzdHMnIHBha2V0aSBidWx1bmFtYWTEsS4gTMO8dGZlbiAncGlw
+IGluc3RhbGwgcmVxdWVzdHMnIMOnYWzEscWfdMSxcsSxbi4iKQogICAgZXhpdCgxKQoKIyA9PT09PT09
+PT09PT09PT09PT09PT09PT09CiMgIFlhcMSxbGFuZMSxcm1hCiMgPT09PT09PT09PT09PT09PT09PT09
+PT09PQoKRU5WX1BBVEggPSByIkM6XFByb2dyYW1EYXRhXHVzZXJfYWN0aXZpdHlfbW9uaXRvclx1c2Vy
+X2FjdGl2aXR5X21vbml0b3IuZW52IgpMT0dfRElSID0gciJDOlxQcm9ncmFtRGF0YVx1c2VyX2FjdGl2
+aXR5X21vbml0b3JcbG9ncyIKTE9HX0ZJTEUgPSBvcy5wYXRoLmpvaW4oTE9HX0RJUiwgImFjdGl2aXR5
+X21vbml0b3IubG9nIikKCiMgTG9nZ2luZyB5YXDEsWxhbmTEsXJtYXPEsQpvcy5tYWtlZGlycyhMT0df
+RElSLCBleGlzdF9vaz1UcnVlKQpsb2dnaW5nLmJhc2ljQ29uZmlnKAogICAgbGV2ZWw9bG9nZ2luZy5J
+TkZPLAogICAgZm9ybWF0PSJbJShhc2N0aW1lKXNdIFslKGxldmVsbmFtZSlzXSAlKG1lc3NhZ2UpcyIs
+CiAgICBoYW5kbGVycz1bCiAgICAgICAgbG9nZ2luZy5GaWxlSGFuZGxlcihMT0dfRklMRSwgZW5jb2Rp
+bmc9InV0Zi04IiksCiAgICAgICAgbG9nZ2luZy5TdHJlYW1IYW5kbGVyKCkKICAgIF0KKQoKIyBXaW5k
+b3dzIEV2ZW50IElEJ2xlcmkKRVZFTlRfTE9HT05fU1VDQ0VTUyA9IDQ2MjQKRVZFTlRfTE9HT05fRkFJ
+TEVEID0gNDYyNQpFVkVOVF9MT0dPRkYgPSA0NjM0CkVWRU5UX0FDQ09VTlRfTE9DS0VEID0gNDc0MApF
+VkVOVF9QUk9DRVNTX0NSRUFURSA9IDQ2ODgKRVZFTlRfRklMRV9BQ0NFU1MgPSA0NjYzICAjIE9iamVj
+dCBBY2Nlc3MgKEZpbGUpCkVWRU5UX1JFR0lTVFJZX0FDQ0VTUyA9IDQ2NTcgICMgUmVnaXN0cnkgQWNj
+ZXNzCgojIElQIC0+IHNvbiBoYXRhbMSxIGRlbmVtZWxlcmluIHphbWFubGFyxLEKZmFpbF9ldmVudHMg
+PSBkZWZhdWx0ZGljdChkZXF1ZSkKCgojID09PT09PT09PT09PT09PT09PT09PT09PT0KIyAgWWFyZMSx
+bWPEsSBGb25rc2l5b25sYXIKIyA9PT09PT09PT09PT09PT09PT09PT09PT09CgpkZWYgbG9hZF9lbnYo
+cGF0aDogc3RyKSAtPiBkaWN0OgogICAgIiIiV2luZG93cyAuZW52IGRvc3lhc8SxbsSxIG9rdXIiIiIK
+ICAgIGVudiA9IHt9CiAgICBpZiBub3Qgb3MucGF0aC5leGlzdHMocGF0aCk6CiAgICAgICAgbG9nZ2lu
+Zy53YXJuaW5nKGYiW1dBUk5dIEVudiBkb3N5YXPEsSBidWx1bmFtYWTEsToge3BhdGh9IikKICAgICAg
+ICByZXR1cm4gZW52CgogICAgdHJ5OgogICAgICAgIHdpdGggb3BlbihwYXRoLCAiciIsIGVuY29kaW5n
+PSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgICAgIGZvciBsaW5lIGluIGY6CiAgICAgICAgICAgICAgICBs
+aW5lID0gbGluZS5zdHJpcCgpCiAgICAgICAgICAgICAgICBpZiBub3QgbGluZSBvciBsaW5lLnN0YXJ0
+c3dpdGgoIiMiKToKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgaWYg
+Ij0iIG5vdCBpbiBsaW5lOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAg
+ICBrZXksIHZhbHVlID0gbGluZS5zcGxpdCgiPSIsIDEpCiAgICAgICAgICAgICAgICBrZXkgPSBrZXku
+c3RyaXAoKQogICAgICAgICAgICAgICAgdmFsdWUgPSB2YWx1ZS5zdHJpcCgpLnN0cmlwKCciJykuc3Ry
+aXAoIiciKQogICAgICAgICAgICAgICAgZW52W2tleV0gPSB2YWx1ZQogICAgICAgIGxvZ2dpbmcuaW5m
+byhmIltJTkZPXSBFbnYgZG9zeWFzxLEgecO8a2xlbmRpOiB7cGF0aH0iKQogICAgZXhjZXB0IEV4Y2Vw
+dGlvbiBhcyBlOgogICAgICAgIGxvZ2dpbmcuZXJyb3IoZiJbRVJST1JdIEVudiBkb3N5YXPEsSBva3Vu
+dXJrZW4gaGF0YToge2V9IikKICAgIAogICAgcmV0dXJuIGVudgoKCmRlZiBnZXRfcHJpbWFyeV9pcCgp
+IC0+IHN0cjoKICAgICIiIldpbmRvd3MndGEgYW5hIElQIGFkcmVzaW5pIGJ1bHVyIiIiCiAgICB0cnk6
+CiAgICAgICAgcyA9IHNvY2tldC5zb2NrZXQoc29ja2V0LkFGX0lORVQsIHNvY2tldC5TT0NLX0RHUkFN
+KQogICAgICAgIHMuY29ubmVjdCgoIjguOC44LjgiLCA4MCkpCiAgICAgICAgaXAgPSBzLmdldHNvY2tu
+YW1lKClbMF0KICAgICAgICBzLmNsb3NlKCkKICAgICAgICByZXR1cm4gaXAKICAgIGV4Y2VwdCBFeGNl
+cHRpb246CiAgICAgICAgcmV0dXJuICIxMjcuMC4wLjEiCgoKZGVmIGJhbl9pcF93aW5kb3dzKGlwOiBz
+dHIsIHNzaF9wb3J0OiBpbnQgPSAyMik6CiAgICAiIiJXaW5kb3dzIEZpcmV3YWxsIGlsZSBJUCd5aSBi
+YW5sYXIiIiIKICAgIHRyeToKICAgICAgICBydWxlX25hbWUgPSBmIlNTSF9CQU5fe2lwLnJlcGxhY2Uo
+Jy4nLCAnXycpfSIKICAgICAgICBjaGVja19jbWQgPSBbCiAgICAgICAgICAgICJuZXRzaCIsICJhZHZm
+aXJld2FsbCIsICJmaXJld2FsbCIsICJzaG93IiwgInJ1bGUiLAogICAgICAgICAgICBmIm5hbWU9e3J1
+bGVfbmFtZX0iCiAgICAgICAgXQogICAgICAgIHJlc3VsdCA9IHN1YnByb2Nlc3MucnVuKGNoZWNrX2Nt
+ZCwgY2FwdHVyZV9vdXRwdXQ9VHJ1ZSwgdGV4dD1UcnVlLCB0aW1lb3V0PTUpCiAgICAgICAgCiAgICAg
+ICAgaWYgIk5vIHJ1bGVzIG1hdGNoIiBpbiByZXN1bHQuc3Rkb3V0IG9yIHJlc3VsdC5yZXR1cm5jb2Rl
+ICE9IDA6CiAgICAgICAgICAgIGFkZF9jbWQgPSBbCiAgICAgICAgICAgICAgICAibmV0c2giLCAiYWR2
+ZmlyZXdhbGwiLCAiZmlyZXdhbGwiLCAiYWRkIiwgInJ1bGUiLAogICAgICAgICAgICAgICAgZiJuYW1l
+PXtydWxlX25hbWV9IiwKICAgICAgICAgICAgICAgICJkaXI9aW4iLAogICAgICAgICAgICAgICAgImFj
+dGlvbj1ibG9jayIsCiAgICAgICAgICAgICAgICBmInJlbW90ZWlwPXtpcH0iLAogICAgICAgICAgICAg
+ICAgInByb3RvY29sPXRjcCIsCiAgICAgICAgICAgICAgICBmImxvY2FscG9ydD17c3NoX3BvcnR9IiwK
+ICAgICAgICAgICAgICAgICJlbmFibGU9eWVzIgogICAgICAgICAgICBdCiAgICAgICAgICAgIHN1YnBy
+b2Nlc3MucnVuKGFkZF9jbWQsIGNoZWNrPUZhbHNlLCBjYXB0dXJlX291dHB1dD1UcnVlLCB0aW1lb3V0
+PTUpCiAgICAgICAgICAgIGxvZ2dpbmcuaW5mbyhmIltCQU5dIHtpcH0gV2luZG93cyBGaXJld2FsbCBp
+bGUgYmFubGFuZMSxIikKICAgICAgICAgICAgcmV0dXJuIFRydWUKICAgICAgICByZXR1cm4gRmFsc2UK
+ICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICBsb2dnaW5nLmVycm9yKGYiW0VSUk9SXSBJ
+UCBiYW5sYW1hIGhhdGFzxLEgKHtpcH0pOiB7ZX0iKQogICAgICAgIHJldHVybiBGYWxzZQoKCmRlZiBz
+ZW5kX3RvX3dlYmhvb2sod2ViaG9va191cmw6IHN0ciwgcGF5bG9hZDogZGljdCwgbWF4X3JldHJpZXM6
+IGludCA9IDMpOgogICAgIiIibjhuIHdlYmhvb2snYSBnw7ZuZGVyaXIsIHJldHJ5IG1la2FuaXptYXPE
+sSBpbGUiIiIKICAgIGZvciBhdHRlbXB0IGluIHJhbmdlKG1heF9yZXRyaWVzKToKICAgICAgICB0cnk6
+CiAgICAgICAgICAgIHIgPSByZXF1ZXN0cy5wb3N0KHdlYmhvb2tfdXJsLCBqc29uPXBheWxvYWQsIHRp
+bWVvdXQ9NSkKICAgICAgICAgICAgci5yYWlzZV9mb3Jfc3RhdHVzKCkKICAgICAgICAgICAgbG9nZ2lu
+Zy5kZWJ1ZyhmIltXRUJIT09LXSBCYcWfYXLEsWzEsToge3BheWxvYWQuZ2V0KCdldmVudF90eXBlJyl9
+IikKICAgICAgICAgICAgcmV0dXJuIFRydWUKICAgICAgICBleGNlcHQgcmVxdWVzdHMuZXhjZXB0aW9u
+cy5SZXF1ZXN0RXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGlmIGF0dGVtcHQgPCBtYXhfcmV0cmll
+cyAtIDE6CiAgICAgICAgICAgICAgICBsb2dnaW5nLndhcm5pbmcoZiJbV0VCSE9PS10gRGVuZW1lIHth
+dHRlbXB0ICsgMX0ve21heF9yZXRyaWVzfSBiYcWfYXLEsXPEsXouLi4iKQogICAgICAgICAgICAgICAg
+dGltZS5zbGVlcCgyKQogICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgbG9nZ2luZy5lcnJv
+cihmIltXRUJIT09LXSB7bWF4X3JldHJpZXN9IGRlbmVtZSBzb25yYXPEsSBiYcWfYXLEsXPEsXo6IHtl
+fSIpCiAgICAgICAgICAgICAgICBlcnJvcl9sb2cgPSBvcy5wYXRoLmpvaW4oTE9HX0RJUiwgIndlYmhv
+b2tfZXJyb3JzLmxvZyIpCiAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgd2l0
+aCBvcGVuKGVycm9yX2xvZywgImEiLCBlbmNvZGluZz0idXRmLTgiKSBhcyBmOgogICAgICAgICAgICAg
+ICAgICAgICAgICBmLndyaXRlKGpzb24uZHVtcHMoewogICAgICAgICAgICAgICAgICAgICAgICAgICAg
+InRpbWVzdGFtcCI6IGRhdGV0aW1lLm5vdyh0aW1lem9uZS51dGMpLmlzb2Zvcm1hdCgpLAogICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgImVycm9yIjogc3RyKGUpLAogICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgInBheWxvYWQiOiBwYXlsb2FkCiAgICAgICAgICAgICAgICAgICAgICAgIH0pICsgIlxuIikK
+ICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgcGFz
+cwogICAgICAgICAgICAgICAgcmV0dXJuIEZhbHNlCiAgICByZXR1cm4gRmFsc2UKCgpkZWYgdHJhY2tf
+ZmFpbF9hbmRfY2hlY2tfYmFuKGlwOiBzdHIsIG5vd190czogZmxvYXQsIHRpbWVfd2luZG93OiBpbnQs
+IG1heF9hdHRlbXB0czogaW50KToKICAgICIiIkJhxZ9hcsSxc8SxeiBkZW5lbWVsZXJpIHRha2lwIGVk
+ZXIgdmUgYmFuIGtvbnRyb2zDvCB5YXBhciIiIgogICAgZHEgPSBmYWlsX2V2ZW50c1tpcF0KICAgIGRx
+LmFwcGVuZChub3dfdHMpCiAgICAKICAgIGN1dG9mZiA9IG5vd190cyAtIHRpbWVfd2luZG93CiAgICB3
+aGlsZSBkcSBhbmQgZHFbMF0gPCBjdXRvZmY6CiAgICAgICAgZHEucG9wbGVmdCgpCiAgICAKICAgIGZh
+aWxfY291bnQgPSBsZW4oZHEpCiAgICBiYW5fdHJpZ2dlcmVkID0gZmFpbF9jb3VudCA+PSBtYXhfYXR0
+ZW1wdHMKICAgIHJldHVybiBmYWlsX2NvdW50LCBiYW5fdHJpZ2dlcmVkCgoKZGVmIHJlYWRfd2luZG93
+c19ldmVudHMobG9nX25hbWU6IHN0ciwgZXZlbnRfaWRzOiBsaXN0LCBtYXhfZXZlbnRzOiBpbnQgPSAx
+MDApOgogICAgIiIiUG93ZXJTaGVsbCBpbGUgV2luZG93cyBFdmVudCBMb2cnZGFuIGV2ZW50bGVyaSBv
+a3VyIiIiCiAgICBldmVudF9pZHNfc3RyID0gIiwiLmpvaW4obWFwKHN0ciwgZXZlbnRfaWRzKSkKICAg
+IHBzX3NjcmlwdCA9IGYiIiIKICAgIEdldC1XaW5FdmVudCAtTG9nTmFtZSAie2xvZ19uYW1lfSIgLU1h
+eEV2ZW50cyB7bWF4X2V2ZW50c30gLUVycm9yQWN0aW9uIFNpbGVudGx5Q29udGludWUgfCAKICAgIFdo
+ZXJlLU9iamVjdCB7eyAkXy5JZCAtaW4gQCh7ZXZlbnRfaWRzX3N0cn0pIH19IHwKICAgIEZvckVhY2gt
+T2JqZWN0IHt7CiAgICAgICAgJHRpbWUgPSAkXy5UaW1lQ3JlYXRlZC5Ub1N0cmluZygieXl5eS1NTS1k
+ZCBIaDptbTpzcyIpCiAgICAgICAgJGlkID0gJF8uSWQKICAgICAgICAkbXNnID0gJF8uTWVzc2FnZQog
+ICAgICAgICR4bWwgPSAkXy5Ub1htbCgpCiAgICAgICAgV3JpdGUtT3V0cHV0ICIkdGltZXwkaWR8JHht
+bHwkbXNnIgogICAgfX0KICAgICIiIgogICAgCiAgICB0cnk6CiAgICAgICAgcmVzdWx0ID0gc3VicHJv
+Y2Vzcy5ydW4oCiAgICAgICAgICAgIFsicG93ZXJzaGVsbCIsICItQ29tbWFuZCIsIHBzX3NjcmlwdF0s
+CiAgICAgICAgICAgIGNhcHR1cmVfb3V0cHV0PVRydWUsCiAgICAgICAgICAgIHRleHQ9VHJ1ZSwKICAgICAg
+ICAgICAgdGltZW91dD0xMAogICAgICAgICkKICAgICAgICByZXR1cm4gcmVzdWx0LnN0ZG91dAogICAg
+ZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgIGxvZ2dpbmcuZXJyb3IoZiJbRVJST1JdIFBvd2Vy
+U2hlbGwgZXZlbnQgb2t1bWEgaGF0YXPEsToge2V9IikKICAgICAgICByZXR1cm4gIiIKCgpkZWYgcGFy
+c2VfZXZlbnRfeG1sKHhtbF9zdHI6IHN0cik6CiAgICAiIiJFdmVudCBYTUwnZGVuIGJpbGdpbGVyaSDD
+p8Sxa2FyxLFyIiIiCiAgICBkYXRhID0ge30KICAgIHRyeToKICAgICAgICAjIEJhc2l0IFhNTCBwYXJz
+aW5nIChFdmVudERhdGEgacOnaW5kZWtpIERhdGEgZWxlbWVudGxlcmkpCiAgICAgICAgaW1wb3J0IHht
+bC5ldHJlZS5FbGVtZW50VHJlZSBhcyBFVAogICAgICAgIHJvb3QgPSBFVC5mcm9tc3RyaW5nKHhtbF9z
+dHIpCiAgICAgICAgCiAgICAgICAgIyBFdmVudERhdGEgacOnaW5kZWtpIERhdGEgZWxlbWVudGxlcmlu
+aSBidWwKICAgICAgICBmb3IgZGF0YV9lbGVtIGluIHJvb3QuZmluZGFsbCgiLi8ve2h0dHA6Ly9zY2hl
+bWFzLm1pY3Jvc29mdC5jb20vd2luLzIwMDQvMDgvZXZlbnRzL2V2ZW50fURhdGEiKToKICAgICAgICAgICAg
+bmFtZSA9IGRhdGFfZWxlbS5nZXQoIk5hbWUiLCAiIikKICAgICAgICAgICAgdmFsdWUgPSBkYXRhX2Vs
+ZW0udGV4dCBvciAiIgogICAgICAgICAgICBpZiBuYW1lOgogICAgICAgICAgICAgICAgZGF0YVtuYW1l
+Lmxvd2VyKCldID0gdmFsdWUKICAgICAgICAKICAgICAgICAjIFN5c3RlbSBpw6dpbmRla2kgYmlsZ2ls
+ZXIKICAgICAgICBzeXN0ZW0gPSByb290LmZpbmQoIi4vL3todHRwOi8vc2NoZW1hcy5taWNyb3NvZnQu
+Y29tL3dpbi8yMDA0LzA4L2V2ZW50cy9ldmVudH1TeXN0ZW0iKQogICAgICAgIGlmIHN5c3RlbSBpcyBu
+b3QgTm9uZToKICAgICAgICAgICAgZXZlbnRfaWRfZWxlbSA9IHN5c3RlbS5maW5kKCIuLy97aHR0cDov
+L3NjaGVtYXMubWljcm9zb2Z0LmNvbS93aW4vMjAwNC8wOC9ldmVudHMvZXZlbnR9RXZlbnRJRCIpCiAg
+ICAgICAgICAgIGlmIGV2ZW50X2lkX2VsZW0gaXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICBkYXRh
+WyJldmVudF9pZCJdID0gZXZlbnRfaWRfZWxlbS50ZXh0CiAgICAgICAgCiAgICBleGNlcHQgRXhjZXB0
+aW9uIGFzIGU6CiAgICAgICAgbG9nZ2luZy5kZWJ1ZyhmIltERUJVR10gWE1MIHBhcnNlIGhhdGFzxLE6
+IHtlfSIpCiAgICAKICAgIHJldHVybiBkYXRhCgoKZGVmIGdldF9wb3dlcnNoZWxsX2hpc3RvcnkodXNl
+cjogc3RyID0gTm9uZSk6CiAgICAiIiJQb3dlclNoZWxsIGtvbXV0IGdlw6dtacWfaW5pIG9rdXIiIiIK
+ICAgIGhpc3RvcnlfcGF0aHMgPSBbCiAgICAgICAgciJDOlxVc2Vyc1x7fVxBcHBEYXRhXFJvYW1pbmdc
+TWljcm9zb2Z0XFdpbmRvd3NcUG93ZXJTaGVsbFxQU1JlYWRMaW5lXENvbnNvbGVIb3N0X2hpc3Rvcnku
+dHh0Ii5mb3JtYXQodXNlciBvciBvcy5nZXRlbnYoIlVTRVJOQU1FIikpLAogICAgICAgIHIiQzpcVXNl
+cnNce31cQXBwRGF0YVxSb2FtaW5nXE1pY3Jvc29mdFxXaW5kb3dzXFBvd2VyU2hlbGxcUFNSZWFkTGlu
+ZVxDb25zb2xlSG9zdF9oaXN0b3J5LnR4dCIuZm9ybWF0KG9zLmdldGVudigiVVNFUk5BTUUiKSkKICAg
+IF0KICAgIAogICAgY29tbWFuZHMgPSBbXQogICAgZm9yIGhpc3RfcGF0aCBpbiBoaXN0b3J5X3BhdGhz
+OgogICAgICAgIGlmIG9zLnBhdGguZXhpc3RzKGhpc3RfcGF0aCk6CiAgICAgICAgICAgIHRyeToKICAg
+ICAgICAgICAgICAgIHdpdGggb3BlbihoaXN0X3BhdGgsICJyIiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJy
+b3JzPSJpZ25vcmUiKSBhcyBmOgogICAgICAgICAgICAgICAgICAgIGxpbmVzID0gZi5yZWFkbGluZXMo
+KQogICAgICAgICAgICAgICAgICAgIGNvbW1hbmRzLmV4dGVuZChsaW5lc1stMTA6XSkKICAgICAgICAg
+ICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgIHBhc3MKICAgIAogICAgcmV0dXJuIGNv
+bW1hbmRzWy0xMDpdIGlmIGNvbW1hbmRzIGVsc2UgW10KCgpkZWYgbW9uaXRvcl9wb3dlcnNoZWxsX2hp
+c3RvcnkoKToKICAgICIiIlBvd2VyU2hlbGwga29tdXQgZ2XDp21pxZ9pbmkgcGVyaXlvZGlrIG9sYXJh
+ayBrb250cm9sIGVkZXIiIiIKICAgIGxhc3RfY2hlY2tzID0ge30KICAgIAogICAgd2hpbGUgVHJ1ZToK
+ICAgICAgICB0cnk6CiAgICAgICAgICAgICMgVMO8bSBrdWxsYW7EsWPEsWxhcsSxbiBoaXN0b3J5IGRv
+c3lhbGFyxLFuxLEga29udHJvbCBldAogICAgICAgICAgICB1c2Vyc19kaXIgPSByIkM6XFVzZXJzIgog
+ICAgICAgICAgICBpZiBvcy5wYXRoLmV4aXN0cyh1c2Vyc19kaXIpOgogICAgICAgICAgICAgICAgZm9y
+IHVzZXJfZGlyIGluIG9zLmxpc3RkaXIodXNlcnNfZGlyKToKICAgICAgICAgICAgICAgICAgICB1c2VyX3Bh
+dGggPSBvcy5wYXRoLmpvaW4odXNlcnNfZGlyLCB1c2VyX2RpcikKICAgICAgICAgICAgICAgICAgICBp
+ZiBvcy5wYXRoLmlzZGlyKHVzZXJfcGF0aCk6CiAgICAgICAgICAgICAgICAgICAgICAgIGhpc3RfZmlsZSA9
+IG9zLnBhdGguam9pbigKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHVzZXJfcGF0aCwKICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgIHIiQXBwRGF0YVxSb2FtaW5nXE1pY3Jvc29mdFxXaW5kb3dzXFBvd2Vy
+U2hlbGxcUFNSZWFkTGluZVxDb25zb2xlSG9zdF9oaXN0b3J5LnR4dCIKICAgICAgICAgICAgICAgICAg
+ICAgICAgKQogICAgICAgICAgICAgICAgICAgICAgICBpZiBvcy5wYXRoLmV4aXN0cyhoaXN0X2ZpbGUp
+OgogICAgICAgICAgICAgICAgICAgICAgICAgICAgbXRpbWUgPSBvcy5wYXRoLmdldG10aW1lKGhpc3Rf
+ZmlsZSkKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxhc3RfY2hlY2sgPSBsYXN0X2NoZWNrcy5n
+ZXQoaGlzdF9maWxlLCAwKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAg
+ICAgICAgICAgICAgICBpZiBtdGltZSA+IGxhc3RfY2hlY2s6CiAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgICAgICAgICMgWWVuaSBrb211dGxhciB2YXIKICAgICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHdpdGggb3BlbihoaXN0
+X2ZpbGUsICJyIiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJyb3JzPSJpZ25vcmUiKSBhcyBmOgogICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxpbmVzID0gZi5yZWFkbGluZXMoKQogICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgbmV3X2NvbW1hbmRzID0gbGluZXNbLTU6XSAgIyBT
+b24gNSBrb211dAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICAgICBmb3IgY21kIGluIG5ld19jb21tYW5kczoKICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBsb2dnaW5nLmluZm8oZiJbUE9XRVJT
+SEVMTF0ge3VzZXJfZGlyfToge2NtZC5zdHJpcCgpfSIpCiAgICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgICAgICBwYXNzCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICBsYXN0X2NoZWNrc1toaXN0X2ZpbGVdID0gbXRpbWUKICAg
+ICAgICAgICAgCiAgICAgICAgICAgIHRpbWUuc2xlZXAoMzApICAjIDMwIHNhbml5ZWRlIGJpciBrb250
+cm9sIGV0CiAgICAgICAgICAgIAogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAg
+ICAgbG9nZ2luZy5lcnJvcihmIltFUlJPUl0gUG93ZXJTaGVsbCBoaXN0b3J5IGl6bGVtZSBoYXRhc8Sx
+OiB7ZX0iKQogICAgICAgICAgICB0aW1lLnNsZWVwKDYwKQoKCmRlZiBmb2xsb3dfd2luZG93c19ldmVu
+dHMoKToKICAgICIiIldpbmRvd3MgRXZlbnQgTG9nJ2xhcsSxbsSxIHPDvHJla2xpIGl6bGVyIiIiCiAg
+ICBsYXN0X2V2ZW50X3RpbWVzID0gewogICAgICAgICJTZWN1cml0eSI6IGRhdGV0aW1lLm5vdyh0aW1l
+em9uZS51dGMpLAogICAgICAgICJPcGVuU1NIL09wZXJhdGlvbmFsIjogZGF0ZXRpbWUubm93KHRpbWV6
+b25lLnV0YykKICAgIH0KICAgIAogICAgIyDEsHpsZW5lY2VrIGV2ZW50IElEJ2xlcmkKICAgIHNlY3Vy
+aXR5X2V2ZW50cyA9IFsKICAgICAgICBFVkVOVF9MT0dPTl9TVUNDRVNTLAogICAgICAgIEVWRU5UX0xP
+R09OX0ZBSUxFRCwKICAgICAgICBFVkVOVF9MT0dPRkYsCiAgICAgICAgRVZFTlRfUFJPQ0VTU19DUkVB
+VEUsCiAgICAgICAgRVZFTlRfRklMRV9BQ0NFU1MsCiAgICAgICAgRVZFTlRfUkVHSVNUUllfQUNDRVNT
+CiAgICBdCiAgICAKICAgIHNzaF9ldmVudHMgPSBbNCwgNSwgNl0gICMgT3BlblNTSCBldmVudCBJRCds
+ZXJpCiAgICAKICAgIHdoaWxlIFRydWU6CiAgICAgICAgdHJ5OgogICAgICAgICAgICAjIFNlY3VyaXR5
+IExvZwogICAgICAgICAgICBldmVudHMgPSByZWFkX3dpbmRvd3NfZXZlbnRzKCJTZWN1cml0eSIsIHNl
+Y3VyaXR5X2V2ZW50cywgNTApCiAgICAgICAgICAgIGZvciBsaW5lIGluIGV2ZW50cy5zdHJpcCgpLnNw
+bGl0KCJcbiIpOgogICAgICAgICAgICAgICAgaWYgbm90IGxpbmUgb3IgInwiIG5vdCBpbiBsaW5lOgog
+ICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAg
+IHRyeToKICAgICAgICAgICAgICAgICAgICBwYXJ0cyA9IGxpbmUuc3BsaXQoInwiLCAzKQogICAgICAg
+ICAgICAgICAgICAgIGlmIGxlbihwYXJ0cykgPCA0OgogICAgICAgICAgICAgICAgICAgICAgICBjb250
+aW51ZQogICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgIGV2ZW50X3RpbWVfc3Ry
+LCBldmVudF9pZCwgeG1sX2RhdGEsIG1lc3NhZ2UgPSBwYXJ0cwogICAgICAgICAgICAgICAgICAgIGV2
+ZW50X3RpbWUgPSBkYXRldGltZS5zdHJwdGltZShldmVudF90aW1lX3N0ciwgIiVZLSVtLSVkICVIOiVN
+OiVTIikKICAgICAgICAgICAgICAgICAgICBldmVudF90aW1lID0gZXZlbnRfdGltZS5yZXBsYWNlKHR6
+aW5mbz10aW1lem9uZS51dGMpCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgaWYg
+ZXZlbnRfdGltZSA+IGxhc3RfZXZlbnRfdGltZXNbIlNlY3VyaXR5Il06CiAgICAgICAgICAgICAgICAg
+ICAgICAgIGV2ZW50X2RhdGEgPSBwYXJzZV9ldmVudF94bWwoeG1sX2RhdGEpCiAgICAgICAgICAgICAg
+ICAgICAgICAgIGV2ZW50X2RhdGFbImV2ZW50X2lkIl0gPSBldmVudF9pZAogICAgICAgICAgICAgICAg
+ICAgICAgICBldmVudF9kYXRhWyJ0aW1lIl0gPSBldmVudF90aW1lCiAgICAgICAgICAgICAgICAgICAg
+ICAgIGV2ZW50X2RhdGFbIm1lc3NhZ2UiXSA9IG1lc3NhZ2UKICAgICAgICAgICAgICAgICAgICAgICAg
+ZXZlbnRfZGF0YVsibG9nX25hbWUiXSA9ICJTZWN1cml0eSIKICAgICAgICAgICAgICAgICAgICAgICAg
+CiAgICAgICAgICAgICAgICAgICAgICAgIHlpZWxkIGV2ZW50X2RhdGEKICAgICAgICAgICAgICAgICAg
+ICAgICAgbGFzdF9ldmVudF90aW1lc1siU2VjdXJpdHkiXSA9IGV2ZW50X3RpbWUKICAgICAgICAgICAg
+ICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgICAgICAgICAgbG9nZ2luZy5k
+ZWJ1ZyhmIltERUJVR10gRXZlbnQgcGFyc2UgaGF0YXPEsToge2V9IikKICAgICAgICAgICAgICAgICAg
+ICBjb250aW51ZQogICAgICAgICAgICAKICAgICAgICAgICAgIyBPcGVuU1NIIExvZwogICAgICAgICAg
+ICBldmVudHMgPSByZWFkX3dpbmRvd3NfZXZlbnRzKCJPcGVuU1NIL09wZXJhdGlvbmFsIiwgc3NoX2V2
+ZW50cywgNTApCiAgICAgICAgICAgIGZvciBsaW5lIGluIGV2ZW50cy5zdHJpcCgpLnNwbGl0KCJcbiIp
+OgogICAgICAgICAgICAgICAgaWYgbm90IGxpbmUgb3IgInwiIG5vdCBpbiBsaW5lOgogICAgICAgICAg
+ICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgIHRyeToKICAg
+ICAgICAgICAgICAgICAgICBwYXJ0cyA9IGxpbmUuc3BsaXQoInwiLCAzKQogICAgICAgICAgICAgICAg
+ICAgIGlmIGxlbihwYXJ0cykgPCA0OgogICAgICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAg
+ICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgIGV2ZW50X3RpbWVfc3RyLCBldmVudF9p
+ZCwgeG1sX2RhdGEsIG1lc3NhZ2UgPSBwYXJ0cwogICAgICAgICAgICAgICAgICAgIGV2ZW50X3RpbWUg
+PSBkYXRldGltZS5zdHJwdGltZShldmVudF90aW1lX3N0ciwgIiVZLSVtLSVkICVIOiVNOiVTIikKICAg
+ICAgICAgICAgICAgICAgICBldmVudF90aW1lID0gZXZlbnRfdGltZS5yZXBsYWNlKHR6aW5mbz10aW1l
+em9uZS51dGMpCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgaWYgZXZlbnRf
+dGltZSA+IGxhc3RfZXZlbnRfdGltZXNbIk9wZW5TU0gvT3BlcmF0aW9uYWwiXToKICAgICAgICAgICAg
+ICAgICAgICAgICAgZXZlbnRfZGF0YSA9IHBhcnNlX2V2ZW50X3htbCh4bWxfZGF0YSkKICAgICAgICAg
+ICAgICAgICAgICAgICAgZXZlbnRfZGF0YVsiZXZlbnRfaWQiXSA9IGV2ZW50X2lkCiAgICAgICAgICAg
+ICAgICAgICAgICAgIGV2ZW50X2RhdGFbInRpbWUiXSA9IGV2ZW50X3RpbWUKICAgICAgICAgICAgICAg
+ICAgICAgICAgZXZlbnRfZGF0YVsibWVzc2FnZSJdID0gbWVzc2FnZQogICAgICAgICAgICAgICAgICAg
+ICAgICBldmVudF9kYXRhWyJsb2dfbmFtZSJdID0gIk9wZW5TU0gvT3BlcmF0aW9uYWwiCiAgICAgICAg
+ICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgeWllbGQgZXZlbnRfZGF0YQog
+ICAgICAgICAgICAgICAgICAgICAgICBsYXN0X2V2ZW50X3RpbWVzWyJPcGVuU1NIL09wZXJhdGlvbmFs
+Il0gPSBldmVudF90aW1lCiAgICAgICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAg
+ICAgICAgICAgICAgICAgbG9nZ2luZy5kZWJ1ZyhmIltERUJVR10gU1NIIGV2ZW50IHBhcnNlIGhhdGFz
+xLE6IHtlfSIpCiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgCiAgICAgICAg
+ICAgIHRpbWUuc2xlZXAoNSkgICMgNSBzYW5peWVkZSBiaXIga29udHJvbCBldAogICAgICAgICAgICAK
+ICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGxvZ2dpbmcuZXJyb3IoZiJb
+RVJST1JdIEV2ZW50IGl6bGVtZSBoYXRhc8SxOiB7ZX0iKQogICAgICAgICAgICB0aW1lLnNsZWVwKDEw
+KQoKIyA9PT09PT09PT09PT09PT09PT09PT09PT0KIyAgQW5hIEZvbmtzaXlvbgojID09PT09PT09PT09
+PT09PT09PT09PT09PT0KCmRlZiBtYWluKCk6CiAgICAiIiJBbmEgZMO2bmfDvCIiIgogICAgbG9nZ2lu
+Zy5pbmZvKCI9IiAqIDYwKQogICAgbG9nZ2luZy5pbmZvKCJLdWxsYW7EsWPEsSBBa3Rpdml0ZSDEsHps
+ZW1lIFNpc3RlbWkgLSBXaW5kb3dzIFNlcnZlciIpCiAgICBsb2dnaW5nLmluZm8oIj0iICogNjApCiAg
+ICAKICAgICMgLmVudiBkb3N5YXPEsW7EsSB5w7xrbGUKICAgIGVudiA9IGxvYWRfZW52KEVOVl9QQVRI
+KQogICAgCiAgICAjIEdlcmVrbGkgYXlhcmxhcsSxIGtvbnRyb2wgZXQKICAgIHdlYmhvb2tfdXJsID0g
+ZW52LmdldCgiV0VCSE9PS19VUkwiLCAiIikuc3RyaXAoKQogICAgaWYgbm90IHdlYmhvb2tfdXJsOgog
+ICAgICAgIGxvZ2dpbmcuZXJyb3IoIltGQVRBTF0gV0VCSE9PS19VUkwgLmVudiBkb3N5YXPEsW5kYSB0
+YW7EsW1sxLEgZGXEn2lsISIpCiAgICAgICAgbG9nZ2luZy5lcnJvcihmIltGQVRBTF0gTMO8dGZlbiB7
+RU5WX1BBVEh9IGRvc3lhc8SxbsSxIGTDvHplbmxleWluLiIpCiAgICAgICAgcmV0dXJuCiAgICAKICAg
+ICMgU3VudWN1IGJpbGdpbGVyaQogICAgaG9zdG5hbWUgPSBzb2NrZXQuZ2V0aG9zdG5hbWUoKQogICAg
+cHJpbWFyeV9pcCA9IGdldF9wcmltYXJ5X2lwKCkKICAgIHNlcnZlcl9uYW1lID0gZW52LmdldCgiU0VS
+VkVSX05BTUUiLCAiIikuc3RyaXAoKSBvciBob3N0bmFtZQogICAgc2VydmVyX2lwID0gZW52LmdldCgi
+U0VSVkVSX0lQIiwgIiIpLnN0cmlwKCkgb3IgcHJpbWFyeV9pcAogICAgc2VydmVyX2VudiA9IGVudi5n
+ZXQoIlNFUlZFUl9FTlYiLCAiUHJvZHVjdGlvbiIpCiAgICAKICAgICMgR8O8dmVubGlrIGF5YXJsYXLE
+sQogICAgbWF4X2F0dGVtcHRzID0gaW50KGVudi5nZXQoIk1BWF9BVFRFTVBUUyIsICI1IikpCiAgICB0
+aW1lX3dpbmRvd19zZWMgPSBpbnQoZW52LmdldCgiVElNRV9XSU5ET1dfU0VDIiwgIjEyMCIpKQogICAg
+YmFuX2R1cmF0aW9uID0gaW50KGVudi5nZXQoIkJBTl9EVVJBVElPTiIsICIzNjAwIikpCiAgICBhbGVy
+dF9vbl9zdWNjZXNzID0gZW52LmdldCgiQUxFUlRfT05fU1VDQ0VTUyIsICIxIikgaW4gKCIxIiwgInRy
+dWUiLCAiVHJ1ZSIsICJZRVMiLCAieWVzIikKICAgIAogICAgIyDEsHpsZW1lIGF5YXJsYXLEsQog
+ICAgbW9uaXRvcl9jb21tYW5kcyA9IGVudi5nZXQoIk1PTklUT1JfQ09NTUFORFMiLCAiMSIpIGluICgi
+MSIsICJ0cnVlIiwgIlRydWUiLCAiWUVTIiwgInllcyIpCiAgICBtb25pdG9yX3Byb2Nlc3NlcyA9IGVu
+di5nZXQoIk1PTklUT1JfUFJPQ0VTU0VTIiwgIjEiKSBpbiAoIjEiLCAidHJ1ZSIsICJUcnVlIiwgIllF
+UyIsICJ5ZXMiKQogICAgbW9uaXRvcl9sb2dpbnMgPSBlbnYuZ2V0KCJNT05JVE9SX0xPR0lOUyIsICIx
+IikgaW4gKCIxIiwgInRydWUiLCAiVHJ1ZSIsICJZRVMiLCAieWVzIikKICAgIG1vbml0b3JfZmlsZV9h
+Y2Nlc3MgPSBlbnYuZ2V0KCJNT05JVE9SX0ZJTEVfQUNDRVNTIiwgIjAiKSBpbiAoIjEiLCAidHJ1ZSIs
+ICJUcnVlIiwgIllFUyIsICJ5ZXMiKQogICAgCiAgICAjIFdoaXRlbGlzdAogICAgd2hpdGVsaXN0X2lw
+cyA9IFtdCiAgICB3aGl0ZWxpc3Rfc3RyID0gZW52LmdldCgiV0hJVEVMSVNUX0lQUyIsICIiKS5zdHJp
+cCgpCiAgICBpZiB3aGl0ZWxpc3Rfc3RyOgogICAgICAgIHdoaXRlbGlzdF9pcHMgPSBbaXAuc3RyaXAo
+KSBmb3IgaXAgaW4gd2hpdGVsaXN0X3N0ci5zcGxpdCgiLCIpIGlmIGlwLnN0cmlwKCldCiAgICAKICAg
+IGxvZ2dpbmcuaW5mbyhmIltJTkZPXSBXZWJob29rIFVSTDoge3dlYmhvb2tfdXJsfSIpCiAgICBsb2dn
+aW5nLmluZm8oZiJbSU5GT10gU3VudWN1OiB7c2VydmVyX25hbWV9ICh7c2VydmVyX2lwfSkgfCBPcnRh
+bToge3NlcnZlcl9lbnZ9IikKICAgIGxvZ2dpbmcuaW5mbyhmIltJTkZPXSBFxZ9pazoge21heF9hdHRl
+bXB0c30gZGVuZW1lIC8ge3RpbWVfd2luZG93X3NlY30gc2FuaXllIikKICAgIGxvZ2dpbmcuaW5mbyhm
+IltJTkZPXSBEsHpsZW1lOiBLb211dGxhcj17bW9uaXRvcl9jb21tYW5kc30sIFByb2Nlc3M9e21vbml0
+b3JfcHJvY2Vzc2VzfSwgTG9naW49e21vbml0b3JfbG9naW5zfSIpCiAgICAKICAgICMgUG93ZXJTaGVs
+bCBoaXN0b3J5IGl6bGVtZSB0aHJlYWQnaSBiYcWfbGF0CiAgICBpZiBtb25pdG9yX2NvbW1hbmRzOgog
+ICAgICAgIGhpc3RvcnlfdGhyZWFkID0gdGhyZWFkaW5nLlRocmVhZCh0YXJnZXQ9bW9uaXRvcl9wb3dl
+cnNoZWxsX2hpc3RvcnksIGRhZW1vbj1UcnVlKQogICAgICAgIGhpc3RvcnlfdGhyZWFkLnN0YXJ0KCkK
+ICAgICAgICBsb2dnaW5nLmluZm8oIltJTkZPXSBQb3dlclNoZWxsIGtvbXV0IGdlw6dtacWfaSBpemxl
+bWUgYmHFn2xhdMSxbGTEsSIpCiAgICAKICAgICMgRXZlbnQgTG9nIGl6bGVtZQogICAgbG9nZ2luZy5pbmZv
+KCJbSU5GT10gV2luZG93cyBFdmVudCBMb2cgaXpsZW1lIGJhxZ9sYXTEsWzEsXlvci4uLiIpCiAgICAK
+ICAgIHRyeToKICAgICAgICBmb3IgZXZlbnQgaW4gZm9sbG93X3dpbmRvd3NfZXZlbnRzKCk6CiAgICAg
+ICAgICAgIGV2ZW50X2lkID0gaW50KGV2ZW50LmdldCgiZXZlbnRfaWQiLCAwKSkKICAgICAgICAgICAg
+ZXZlbnRfdGltZSA9IGV2ZW50LmdldCgidGltZSIsIGRhdGV0aW1lLm5vdyh0aW1lem9uZS51dGMpKQog
+ICAgICAgICAgICBtZXNzYWdlID0gZXZlbnQuZ2V0KCJtZXNzYWdlIiwgIiIpCiAgICAgICAgICAgIAog
+ICAgICAgICAgICAjIEJhc2UgcGF5bG9hZAogICAgICAgICAgICBiYXNlX3BheWxvYWQgPSB7CiAgICAg
+ICAgICAgICAgICAidGltZXN0YW1wIjogZXZlbnRfdGltZS5pc29mb3JtYXQoKSwKICAgICAgICAgICAg
+ICAgICJzZXJ2aWNlIjogInVzZXJfYWN0aXZpdHkiLAogICAgICAgICAgICAgICAgInNlcnZlcl9uYW1l
+Ijogc2VydmVyX25hbWUsCiAgICAgICAgICAgICAgICAic2VydmVyX2lwIjogc2VydmVyX2lwLAogICAg
+ICAgICAgICAgICAgInNlcnZlcl9lbnYiOiBzZXJ2ZXJfZW52LAogICAgICAgICAgICAgICAgImV2
+ZW50X2lkIjogZXZlbnRfaWQsCiAgICAgICAgICAgICAgICAicmF3X2xvZyI6IG1lc3NhZ2UKICAgICAg
+ICAgICAgfQogICAgICAgICAgICAKICAgICAgICAgICAgbm93X3RzID0gZXZlbnRfdGltZS50aW1lc3Rh
+bXAoKQogICAgICAgICAgICAKICAgICAgICAgICAgIyBMb2dvbiBTdWNjZXNzICg0NjI0KQogICAgICAg
+ICAgICBpZiBldmVudF9pZCA9PSBFVkVOVF9MT0dPTl9TVUNDRVNTOgogICAgICAgICAgICAgICAgaWYg
+bm90IG1vbml0b3JfbG9naW5zOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAg
+ICAgICAKICAgICAgICAgICAgICAgIHVzZXJuYW1lID0gZXZlbnQuZ2V0KCJ0YXJnZXR1c2VybmFtZSIs
+IGV2ZW50LmdldCgic3ViamVjdHVzZXJuYW1lIiwgIiIpKQogICAgICAgICAgICAgICAgaXAgPSBldmVu
+dC5nZXQoImlwYWRkcmVzcyIsIGV2ZW50LmdldCgiaXAiLCAiIikpCiAgICAgICAgICAgICAgICBsb2dv
+bl90eXBlID0gZXZlbnQuZ2V0KCJsb2dvbnR5cGUiLCAiIikKICAgICAgICAgICAgICAgIAogICAgICAg
+ICAgICAgICAgaWYgYWxlcnRfb25fc3VjY2VzcyBhbmQgaXAgYW5kIGlwIG5vdCBpbiB3aGl0ZWxpc3Rf
+aXBzOgogICAgICAgICAgICAgICAgICAgIGJhc2VfcGF5bG9hZC51cGRhdGUoewogICAgICAgICAgICAg
+ICAgICAgICAgICAiZXZlbnRfdHlwZSI6ICJsb2dvbl9zdWNjZXNzIiwKICAgICAgICAgICAgICAgICAg
+ICAgICAgInVzZXIiOiB1c2VybmFtZSwKICAgICAgICAgICAgICAgICAgICAgICAgImlwIjogaXAsCiAg
+ICAgICAgICAgICAgICAgICAgICAgICJsb2dvbl90eXBlIjogbG9nb25fdHlwZQogICAgICAgICAgICAg
+ICAgICAgIH0pCiAgICAgICAgICAgICAgICAgICAgc2VuZF90b193ZWJob29rKHdlYmhvb2tfdXJsLCBi
+YXNlX3BheWxvYWQpCiAgICAgICAgICAgICAgICAgICAgbG9nZ2luZy5pbmZvKGYiW0xPR09OXSB7dXNl
+cm5hbWV9IEAge2lwfSIpCiAgICAgICAgICAgIAogICAgICAgICAgICAjIExvZ29uIEZhaWxlZCAoNDYy
+NSkKICAgICAgICAgICAgZWxpZiBldmVudF9pZCA9PSBFVkVOVF9MT0dPTl9GQUlMRUQ6CiAgICAgICAg
+ICAgICAgICBpZiBub3QgbW9uaXRvcl9sb2dpbnM6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUK
+ICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgdXNlcm5hbWUgPSBldmVudC5nZXQoInRhcmdl
+dHVzZXJuYW1lIiwgZXZlbnQuZ2V0KCJzdWJqZWN0dXNlcm5hbWUiLCAiIikpCiAgICAgICAgICAgICAg
+ICBpcCA9IGV2ZW50LmdldCgiaXBhZGRyZXNzIiwgZXZlbnQuZ2V0KCJpcCIsICIiKSkKICAgICAgICAg
+ICAgICAgIAogICAgICAgICAgICAgICAgaWYgaXAgYW5kIGlwIG5vdCBpbiB3aGl0ZWxpc3RfaXBzOgog
+ICAgICAgICAgICAgICAgICAgIGZhaWxfY291bnQsIGJhbl90cmlnZ2VyZWQgPSB0cmFja19mYWlsX2Fu
+ZF9jaGVja19iYW4oCiAgICAgICAgICAgICAgICAgICAgICAgIGlwLCBub3dfdHMsIHRpbWVfd2luZG93
+X3NlYywgbWF4X2F0dGVtcHRzCiAgICAgICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgICAg
+IAogICAgICAgICAgICAgICAgICAgIGlmIGJhbl90cmlnZ2VyZWQ6CiAgICAgICAgICAgICAgICAgICAg
+ICAgIGJhbl9pcF93aW5kb3dzKGlwKQogICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAg
+ICAgIGJhc2VfcGF5bG9hZC51cGRhdGUoewogICAgICAgICAgICAgICAgICAgICAgICAiZXZlbnRfdHlw
+ZSI6ICJsb2dvbl9mYWlsZWQiLAogICAgICAgICAgICAgICAgICAgICAgICAidXNlciI6IHVzZXJuYW1l
+LAogICAgICAgICAgICAgICAgICAgICAgICAiaXAiOiBpcCwKICAgICAgICAgICAgICAgICAgICAgICAg
+ImZhaWxfY291bnRfd2luZG93IjogZmFpbF9jb3VudCwKICAgICAgICAgICAgICAgICAgICAgICAgImJh
+bl90cmlnZ2VyZWQiOiBiYW5fdHJpZ2dlcmVkCiAgICAgICAgICAgICAgICAgICAgfSkKICAgICAgICAg
+ICAgICAgICAgICBzZW5kX3RvX3dlYmhvb2sod2ViaG9va191cmwsIGJhc2VfcGF5bG9hZCkKICAgICAg
+ICAgICAgICAgICAgICBsb2dnaW5nLndhcm5pbmcoZiJbTE9HT04gRkFJTEVEXSB7dXNlcm5hbWV9IEAge2lw
+fSIpCiAgICAgICAgICAgIAogICAgICAgICAgICAjIExvZ29mZiAoNDYzNCkKICAgICAgICAgICAgZWxp
+ZiBldmVudF9pZCA9PSBFVkVOVF9MT0dPRkY6CiAgICAgICAgICAgICAgICBpZiBtb25pdG9yX2xvZ2lu
+czoKICAgICAgICAgICAgICAgICAgICB1c2VybmFtZSA9IGV2ZW50LmdldCgidGFyZ2V0dXNlcm5hbWUi
+LCBldmVudC5nZXQoInN1YmplY3R1c2VybmFtZSIsICIiKSkKICAgICAgICAgICAgICAgICAgICBiYXNl
+X3BheWxvYWQudXBkYXRlKHsKICAgICAgICAgICAgICAgICAgICAgICAgImV2ZW50X3R5cGUiOiAibG9n
+b2ZmIiwKICAgICAgICAgICAgICAgICAgICAgICAgInVzZXIiOiB1c2VybmFtZQogICAgICAgICAgICAg
+ICAgICAgIH0pCiAgICAgICAgICAgICAgICAgICAgc2VuZF90b193ZWJob29rKHdlYmhvb2tfdXJsLCBi
+YXNlX3BheWxvYWQpCiAgICAgICAgICAgIAogICAgICAgICAgICAjIFByb2Nlc3MgQ3JlYXRlICg0Njg4
+KQogICAgICAgICAgICBlbGlmIGV2ZW50X2lkID09IEVWRU5UX1BST0NFU1NfQ1JFQVRFOgogICAgICAg
+ICAgICAgICAgaWYgbW9uaXRvcl9wcm9jZXNzZXM6CiAgICAgICAgICAgICAgICAgICAgdXNlcm5hbWUg
+PSBldmVudC5nZXQoInN1YmplY3R1c2VybmFtZSIsICIiKQogICAgICAgICAgICAgICAgICAgIHByb2Nl
+c3NfbmFtZSA9IGV2ZW50LmdldCgicHJvY2Vzc25hbWUiLCAiIikKICAgICAgICAgICAgICAgICAgICBj
+b21tYW5kX2xpbmUgPSBldmVudC5nZXQoImNvbW1hbmRsaW5lIiwgIiIpCiAgICAgICAgICAgICAgICAg
+ICAgCiAgICAgICAgICAgICAgICAgICAgIyBTYWRlY2Ugw7ZuZW1saSBwcm9jZXNzJ2xlcmkgYmlsZGly
+IChvcHNpeW9uZWwgZmlsdHJlbGVtZSkKICAgICAgICAgICAgICAgICAgICBiYXNlX3BheWxvYWQudXBk
+YXRlKHsKICAgICAgICAgICAgICAgICAgICAgICAgImV2ZW50X3R5cGUiOiAicHJvY2Vzc19jcmVhdGUi
+LAogICAgICAgICAgICAgICAgICAgICAgICAidXNlciI6IHVzZXJuYW1lLAogICAgICAgICAgICAgICAg
+ICAgICAgICAicHJvY2Vzc19uYW1lIjogcHJvY2Vzc19uYW1lLAogICAgICAgICAgICAgICAgICAgICAg
+ICAiY29tbWFuZF9saW5lIjogY29tbWFuZF9saW5lCiAgICAgICAgICAgICAgICAgICAgfSkKICAgICAg
+ICAgICAgICAgICAgICBzZW5kX3RvX3dlYmhvb2sod2ViaG9va191cmwsIGJhc2VfcGF5bG9hZCkKICAg
+ICAgICAgICAgICAgICAgICBsb2dnaW5nLmluZm8oZiJbUFJPQ0VTU10ge3VzZXJuYW1lfToge3Byb2Nl
+c3NfbmFtZX0iKQogICAgICAgICAgICAKICAgICAgICAgICAgIyBGaWxlIEFjY2VzcyAoNDY2MykKICAg
+ICAgICAgICAgZWxpZiBldmVudF9pZCA9PSBFVkVOVF9GSUxFX0FDQ0VTUzoKICAgICAgICAgICAgICAg
+IGlmIG1vbml0b3JfZmlsZV9hY2Nlc3M6CiAgICAgICAgICAgICAgICAgICAgdXNlcm5hbWUgPSBldmVu
+dC5nZXQoInN1YmplY3R1c2VybmFtZSIsICIiKQogICAgICAgICAgICAgICAgICAgIG9iamVjdF9uYW1l
+ID0gZXZlbnQuZ2V0KCJvYmplY3RuYW1lIiwgIiIpCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAg
+ICAgICAgICAgICAgYmFzZV9wYXlsb2FkLnVwZGF0ZSh7CiAgICAgICAgICAgICAgICAgICAgICAgICJl
+dmVudF90eXBlIjogImZpbGVfYWNjZXNzIiwKICAgICAgICAgICAgICAgICAgICAgICAgInVzZXIiOiB1
+c2VybmFtZSwKICAgICAgICAgICAgICAgICAgICAgICAgImZpbGVfcGF0aCI6IG9iamVjdF9uYW1lCiAg
+ICAgICAgICAgICAgICAgICAgfSkKICAgICAgICAgICAgICAgICAgICBzZW5kX3RvX3dlYmhvb2sod2Vi
+aG9va191cmwsIGJhc2VfcGF5bG9hZCkKICAgICAgICAgICAgCiAgICAgICAgICAgICMgU1NIIEV2ZW50
+cyAoT3BlblNTSC9PcGVyYXRpb25hbCkKICAgICAgICAgICAgZWxpZiBldmVudC5nZXQoImxvZ19uYW1l
+IikgPT0gIk9wZW5TU0gvT3BlcmF0aW9uYWwiOgogICAgICAgICAgICAgICAgIyBTU0ggYmHFn2FyxLFz
+xLF6IGdpcmnFnwogICAgICAgICAgICAgICAgaWYgImZhaWxlZCIgaW4gbWVzc2FnZS5sb3dlcigpIG9y
+ICJpbnZhbGlkIiBpbiBtZXNzYWdlLmxvd2VyKCk6CiAgICAgICAgICAgICAgICAgICAgaXBfbWF0Y2gg
+PSByZS5zZWFyY2gociIoXGQrXC5cZCtcLlxkK1wuXGQrKSIsIG1lc3NhZ2UpCiAgICAgICAgICAgICAg
+ICAgICAgdXNlcl9tYXRjaCA9IHJlLnNlYXJjaChyInVzZXJbOlxzXSsoXFMrKSIsIG1lc3NhZ2Us
+IHJlLklHTk9SRUNBU0UpCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgaWYg
+aXBfbWF0Y2ggYW5kIHVzZXJfbWF0Y2g6CiAgICAgICAgICAgICAgICAgICAgICAgIGlwID0gaXBfbWF0
+Y2guZ3JvdXAoMSkKICAgICAgICAgICAgICAgICAgICAgICAgdXNlciA9IHVzZXJfbWF0Y2guZ3JvdXAoMSkK
+ICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgIGlmIGlwIG5vdCBp
+biB3aGl0ZWxpc3RfaXBzOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgZmFpbF9jb3VudCwgYmFu
+X3RyaWdnZXJlZCA9IHRyYWNrX2ZhaWxfYW5kX2NoZWNrX2JhbigKICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgICAgICBpcCwgbm93X3RzLCB0aW1lX3dpbmRvd19zZWMsIG1heF9hdHRlbXB0cwogICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICBpZiBiYW5fdHJpZ2dlcmVkOgogICAgICAgICAgICAgICAg
+ICAgICAgICAgICAgICAgIGJhbl9pcF93aW5kb3dzKGlwKQogICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBiYXNlX3BheWxvYWQudXBkYXRlKHsKICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICAiZXZlbnRfdHlwZSI6ICJzc2hfZmFpbGVkX2xvZ2luIiwK
+ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAidXNlciI6IHVzZXIsCiAgICAgICAgICAg
+ICAgICAgICAgICAgICAgICAgICAgImlwIjogaXAsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgImZhaWxfY291bnRfd2luZG93IjogZmFpbF9jb3VudCwKICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICAgICAiYmFuX3RyaWdnZXJlZCI6IGJhbl90cmlnZ2VyZWQKICAgICAgICAgICAgICAgICAg
+ICAgICAgICAgIH0pCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBzZW5kX3RvX3dlYmhvb2sod2Vi
+aG9va191cmwsIGJhc2VfcGF5bG9hZCkKICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgIyBT
+U0ggYmHFn2FyxLFsxLEgZ2lyacWfCiAgICAgICAgICAgICAgICBlbGlmICJhY2NlcHRlZCIgaW4gbWVz
+c2FnZS5sb3dlcigpOgogICAgICAgICAgICAgICAgICAgIGlwX21hdGNoID0gcmUuc2VhcmNoKHIiKFxk
+K1wuXGQrXC5cZCtcLlxkKykiLCBtZXNzYWdlKQogICAgICAgICAgICAgICAgICAgIHVzZXJfbWF0Y2gg
+PSByZS5zZWFyY2gociJ1c2VyWzpcc10rKFxTKykiLCBtZXNzYWdlLCByZS5JR05PUkVDQVNFKQogICAg
+ICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgIGlmIGlwX21hdGNoIGFuZCB1c2VyX21h
+dGNoIGFuZCBhbGVydF9vbl9zdWNjZXNzOgogICAgICAgICAgICAgICAgICAgICAgICBpcCA9IGlwX21h
+dGNoLmdyb3VwKDEpCiAgICAgICAgICAgICAgICAgICAgICAgIHVzZXIgPSB1c2VyX21hdGNoLmdyb3Vw
+KDEpCiAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICBpZiBpcCBp
+biBmYWlsX2V2ZW50czoKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGZhaWxfZXZlbnRzW2lwXS5jbGVh
+cigpCiAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICBiYXNlX3Bh
+eWxvYWQudXBkYXRlKHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICJldmVudF90eXBlIjogInNzaF9z
+dWNjZXNzX2xvZ2luIiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICJ1c2VyIjogdXNlciwKICAg
+ICAgICAgICAgICAgICAgICAgICAgICAgICJpcCI6IGlwCiAgICAgICAgICAgICAgICAgICAgICAg
+IH0pCiAgICAgICAgICAgICAgICAgICAgICAgIHNlbmRfdG9fd2ViaG9vayh3ZWJob29rX3VybCwgYmFz
+ZV9wYXlsb2FkKQogICAgCiAgICBleGNlcHQgS2V5Ym9hcmRJbnRlcnJ1cHQ6CiAgICAgICAgbG9nZ2lu
+Zy5pbmZvKCJbSU5GT10gS3VsbGFuxLFjxLEgdGFyYWbEsW5kYW4gZHVyZHVydWxkdS4iKQogICAgZXhj
+ZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgIGxvZ2dpbmcuZXJyb3IoZiJbRkFUQUxdIEJla2xlbm1l
+eWVuIGhhdGE6IHtlfSIsIGV4Y19pbmZvPVRydWUpCgoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoK
+ICAgIG1haW4oKQoK
 '@
+
+# Base64 string'i decode edip Python script'ini oluştur
+$pythonScript = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($pythonScriptBase64))
 
 $pythonScript | Out-File -FilePath $ScriptPath -Encoding UTF8
 Write-Host "       Script oluşturuldu: $ScriptPath" -ForegroundColor Green

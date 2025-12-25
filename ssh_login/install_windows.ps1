@@ -1,4 +1,4 @@
-﻿﻿# User Activity Monitoring System - Windows Server
+﻿# User Activity Monitoring System - Windows Server
 # One-Command Automatic Installation
 # Usage: Open PowerShell as Administrator and run:
 #   .\install_windows.ps1
@@ -249,7 +249,17 @@ Write-Host "       Configuring service settings..." -ForegroundColor Gray
 
 Write-Host ""
 Write-Host "[8/8] Starting service..." -ForegroundColor Yellow
-Start-Service -Name $ServiceName
+try {
+    Start-Service -Name $ServiceName -ErrorAction Stop
+    Start-Sleep -Seconds 2
+} catch {
+    Write-Host "       ⚠️  Service start failed: $_" -ForegroundColor Yellow
+    Write-Host "       Checking error logs..." -ForegroundColor Gray
+    if (Test-Path "$LogDir\service_stderr.log") {
+        Write-Host "       Error log content:" -ForegroundColor Yellow
+        Get-Content "$LogDir\service_stderr.log" -Tail 10 | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+    }
+}
 
 Start-Sleep -Seconds 2
 
